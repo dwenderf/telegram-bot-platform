@@ -206,10 +206,23 @@ create index on message_log (group_id, telegram_thread_id, created_at desc);
 > **Recent-context query** (replaces the POC's `recent_messages` RPC): given a group and thread, return the most recent N messages (default 30), newest-first, with `telegram_thread_id IS NOT DISTINCT FROM` the target thread (null-safe so the General topic matches). In code this is a parameterized query, not a stored function — but the null-safe thread match and the newest-first-then-reverse-to-chronological handling carry over from the POC exactly.
 
 > **Bot replies are NOT logged in v1.** Only incoming user messages are logged (the bot's own answers don't re-enter context). If bot replies are ever persisted for conversational memory (§9), store a **tag-stripped/plain-text** version in a *separate* table — never the HTML — to avoid markup noise in re-ingested context. Format is a send-time concern only.
+### 3.6 Idempotency / processed updates
 
-### 3.6 RLS
+```sql
+-- Tracks processed Telegram updates to guarantee exactly-once processing (deduplication).
+create table processed_updates (
+  update_id   bigint primary key,
+  entity_id   uuid not null references entities(id) on delete cascade,
+  created_at  timestamptz not null default now()
+);
+create index on processed_updates (created_at);
+```
 
-Enable RLS on `entities`, `groups`, `users`, `memberships`, `manifest_entries`, `doc_cache`, and `message_log`. The platform's service role connects with a key that scopes access; policies must ensure no cross-`entity_id` reads/writes are possible from application queries. (Implementer: design the policy model so the service performs all access in the context of a known `entity_id`, and cross-entity access is structurally impossible. The internal Telegram-webhook and sync flows resolve `entity_id` first, then operate only within it.)
+> **Purge old rows.** Dedup only needs a short window (Telegram retries happen within minutes), but this table grows unboundedly if left alone. Add a scheduled purge of rows older than a few days (e.g. a `pg_cron` job, mirroring the POC's chat-log purge). Keep the retention window comfortably longer than Telegram's retry horizon.
+
+### 3.7 RLS
+
+Enable RLS on `entities`, `groups`, `users`, `memberships`, `manifest_entries`, `doc_cache`, `message_log`, and `processed_updates`. The platform's service role connects with a key that scopes access; policies must ensure no cross-`entity_id` reads/writes are possible from application queries. (Implementer: design the policy model so the service performs all access in the context of a known `entity_id`, and cross-entity access is structurally impossible. The internal Telegram-webhook and sync flows resolve `entity_id` first, then operate only within it.)
 
 ---
 
@@ -260,15 +273,18 @@ The system prompt is assembled as: a role/instruction preamble, an **OUTPUT FORM
 
 > **Thin.** This layer parses Telegram updates, calls §4 capabilities, and formats replies. All the hard-won Telegram behavior below is **required** and is documented in detail (with root causes) in `N8N-WORKFLOW.md` and `INFRASTRUCTURE.md` — those are the authoritative gotcha references; this section states them as requirements.
 
-### 5.1 Inbound flow
+### 5.1 Inbound flow (Asynchronous / Webhook Timeout Prevention)
 
-A Telegram webhook delivers updates to a Vercel API route. For each message update:
+A Telegram webhook delivers updates to a Vercel API route (parameterized route per bot/entity: `/api/webhooks/telegram/[entitySlug]`). For each message update:
 
-1. **Auth:** verify the `x-telegram-bot-api-secret-token` header against the configured secret; reject otherwise (401). *(Carry over the POC's hard-won lesson: secret must be stored clean — no trailing newline.)*
-2. **Resolve tenant** from `chat.id` (`resolveTenant`). If unknown chat, ignore.
-3. **Log** the message (`logMessage`) unless its thread is in an excluded-topics config (e.g. #patent/#legal). *(Excluded-topics is per-entity config.)*
-4. **Determine intent:** is it `/ask` (or `/ask@botname`), an `@mention` of the bot, `/help`, or other? Only `/ask`, `@mention`, and `/help` are handled in v1.
-5. **Acknowledge + answer** (below).
+1. **Auth & Setup:** Resolve the entity from the URL path slug. Fetch its configured secret token, and verify the `x-telegram-bot-api-secret-token` header against it; reject with 401 on mismatch.
+2. **Deduplicate:** Check if `update_id` already exists in `processed_updates`. If so, immediately respond with `200 OK` and stop (idempotency safety net). Otherwise, insert the `update_id`.
+3. **Resolve tenant:** Map the incoming chat ID to a configured group under the resolved entity. If unknown, ignore.
+4. **Log:** Log the incoming message (`logMessage`) unless its thread is in the excluded-topics config.
+5. **Determine intent:** If it's a `/help` command, respond. If it's `/ask` or an `@mention`, handle asynchronously:
+   - **Synchronous block:** Send the 👀 reaction (via `setMessageReaction`) and start the typing action (`sendChatAction`). Then register the rest of the flow in Next.js/Vercel's `waitUntil` context.
+   - **Response:** Return `200 OK` to Telegram immediately to close the connection and prevent duplicate webhook delivery.
+   - **Asynchronous block (via `waitUntil`):** Proceed to build context, call the model, sanitize HTML, and post the reply back to the Telegram chat.
 
 > **Mention detection (POC gotcha):** detecting an `@mention` requires the bot's username; the check prepends `@` itself, so the configured bot username must be the **bare** username (no `@`). An empty/misconfigured bot username makes mentions silently fail while commands still work — the asymmetry is the diagnostic tell. Store the bot username per-entity (each entity has its own bot) and validate it's non-empty at startup.
 
@@ -358,6 +374,7 @@ If any step fails (context build, model call, send), the user must get *some* ho
 Each item is intentionally out of v1. Where the schema already supports it, that's noted — the seam is left clean so the future addition is logic, not migration.
 
 - **Write-commands (`/draft`, `/update`, `/recap`, `/status`, `/docs`).** `/draft`/`/update` produce doc changes **only via PR** (branch → commit → open PR → human merges → sync refreshes cache). Build the PR-creation logic as a **reusable capability function** (e.g. `proposeDocEdit(entity, path, content, author)`) so the future web app's "save" reuses it — same engine, different front-end. `/recap` needs no GitHub read (summarize recent conversation). `/status`/`/docs` are GitHub-list operations.
+  > **Execution-duration caveat:** the §5.1 `waitUntil` pattern extends the function's life to finish background work, but it's still bounded by the Vercel plan's max duration. `/ask` (a few seconds) is comfortably within limits, but a `/draft` doing a model call **plus** multiple GitHub API calls (branch + commit + PR) could approach them. When building write-commands, check the plan's duration ceiling and, if needed, split the work (e.g. enqueue the PR creation) rather than doing it all in one request.
 - **`/setup` and topic auto-scaffolding (v2).** Telegram emits `forum_topic_created` (name + thread id). A v1.5/`/setup` command (run in a topic, reads its own thread id — killing the manual numeric-ID pain) can scaffold a manifest entry + starter doc (via PR). v2 listens for `forum_topic_created` to do it automatically. Requires the manifest to be bot-writable (it already is — manifest is canonical in Postgres).
 - **Group-scoped context resolution.** `manifest_entries.group_id` exists; v1 ignores it (entity-general + topic only). When a second group per entity appears (e.g. HYS Board vs HYS External needing different/segregated context), light up group-layer resolution (general → group → topic) and group-differentiated access. No migration needed.
 - **Web app / management UI.** The product surface: view/edit docs, manage manifest/topics, onboard entities, abstract GitHub away from non-technical users. Sits on the same capability functions (especially `proposeDocEdit`) as a new front-end. The whole architecture is shaped to make this additive.
@@ -380,12 +397,14 @@ Each item is intentionally out of v1. Where the schema already supports it, that
 - **Model provider abstracted; Anthropic-only in v1.**
 - **HTML replies** with the sanitizer; **AGPL-3.0** license.
 - **v1 command scope:** `/ask` + `@mention` + `/help` only.
+- **GitHub Auth:** Use fine-grained PAT for v1 (simplest, stored in tenant config), but abstract the client to accept a token string to seamlessly support GitHub App installation tokens in the future.
+- **Multi-bot webhook routing:** Distinct webhook path per entity using the entity's slug (`/api/webhooks/telegram/[entitySlug]`) to resolve the entity and retrieve webhook secret tokens cleanly before parsing updates.
+- **Webhook timeout mitigation:** Use Next.js/Vercel's `waitUntil` to return `200 OK` immediately after sending the 👀 reaction and starting the typing state, ensuring the long-running LLM call runs in the background and does not cause Telegram retry storms.
+- **Idempotency:** A `processed_updates` table logs `update_id` to block duplicate deliveries.
+- **Sync granularity:** Use the GitHub Compare API (`/repos/{owner}/{repo}/compare/{before}...{after}`) to determine added/modified/renamed/removed files on push events, avoiding delta payload parsing errors.
+- **RLS policy model:** Force RLS on all tenant-scoped tables and apply policies tied to a session variable (e.g. `app.current_entity_id`) to ensure database-level boundary safety even for the `service_role`.
 
-**Open questions / calls for the builder** (flagged, not yet decided — make a deliberate choice):
-- **GitHub auth mechanism for v1:** per-entity fine-grained **PAT** (simplest, matches the POC) vs. a **GitHub App** installation per entity (cleaner scoping, better for the product, more setup). Recommendation: PAT for v1, GitHub App when onboarding becomes self-service.
-- **Multi-bot webhook routing:** distinct webhook path per entity/bot, vs. a single endpoint that resolves entity from chat id and looks up the right bot credentials for outbound calls. Decide based on how Telegram webhook registration is managed per bot.
-- **Sync granularity edge cases:** renames/moves of context files, and large multi-file merges — confirm the changed-files handling covers add/modify/remove/rename.
-- **RLS policy model:** the precise policy expressions enforcing `entity_id` scoping for the service role — design so cross-entity access is structurally impossible.
+**Open questions / calls for the builder**:
 - **CLA:** not needed now (sole author). **Trigger:** if outside contributions start arriving (and the business path is real), add a CLA (e.g. CLA Assistant) or an inbound=outbound + relicensing-grant clause in `CONTRIBUTING.md` *before merging* external PRs — this preserves the ability to relicense (AGPL→looser, or dual-license) later. No action until the first external PR appears.
 
 ---
