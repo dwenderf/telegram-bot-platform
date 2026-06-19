@@ -34,30 +34,24 @@ Per-tenant API tokens and secrets—including `telegram_bot_token`, `telegram_we
 * The application role `bot_service` has **no SELECT access** to the global `vault.decrypted_secrets` view, ensuring a tenant session can never decrypt another tenant's credentials.
 
 ### 4. Least-Privilege Database User (`bot_service`)
-To prevent a leak of the master `postgres` superuser credential, create a restricted database user for the application:
+To prevent a leak of the master `postgres` superuser credential, create a restricted database user for the application as a prerequisite.
+
+> [!NOTE]
+> The database migration automatically handles all required schema, table, sequence, and helper function execution privileges. You only need to manually create the role and configure its default session context prior to running the migration:
 
 ```sql
 -- 1. Create a dedicated role with login credentials
 CREATE ROLE bot_service WITH LOGIN PASSWORD 'your_very_secure_password';
 
--- 2. Grant access to the public schema
-GRANT USAGE ON SCHEMA public TO bot_service;
-
--- 3. Grant table permissions (read/write only)
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO bot_service;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bot_service;
-
--- 4. Apply these privileges automatically to future tables
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO bot_service;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO bot_service;
-
--- 5. Enforce RLS by default by setting the session variable to empty
+-- 2. Enforce RLS by default by setting the session variable to empty
 ALTER ROLE bot_service SET app.current_entity_id = '';
 ```
 
 ---
 
 ## 🛠️ Getting Started
+
+> **For the complete, step-by-step setup and deployment runbook — Supabase project, Vault, the `bot_service` role, the schema migration, Vercel deploy, DNS, and per-tenant onboarding (Telegram bot, secrets, content repo, webhooks) — see [`DEPLOYMENT.md`](./DEPLOYMENT.md).** The quick start below is the abbreviated local-dev path; `DEPLOYMENT.md` is the authoritative end-to-end guide.
 
 ### 1. Configure Environment Variables
 Copy the `.env.example` file and supply your environment details:
@@ -69,7 +63,7 @@ cp .env.example .env.local
 > [!IMPORTANT]
 > **Prerequisite:** Before running the migration script, you must create the `bot_service` role (as shown in the role setup section above), since the migration script makes explicit privilege grants to it.
 
-Run the initialization migration script located in [supabase/migrations/20260618000000_init_schema.sql](file:///Users/davidwender/Documents/GitHub/telegram-bot-platform/supabase/migrations/20260618000000_init_schema.sql) using the Supabase SQL editor.
+Run the initialization migration script located in [supabase/migrations/20260618000000_init_schema.sql](./supabase/migrations/20260618000000_init_schema.sql) using the Supabase SQL editor.
 
 ### 3. Running the Server
 

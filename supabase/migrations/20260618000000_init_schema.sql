@@ -237,3 +237,14 @@ grant execute on function resolve_entity_id_by_slug(text) to bot_service;
 grant execute on function resolve_entity_id_by_repo(text, text) to bot_service;
 grant execute on function get_current_entity_secret(uuid) to bot_service;
 grant execute on function set_current_entity(uuid) to bot_service;
+
+-- Grant base table and sequence privileges for RLS access
+grant usage on schema public to bot_service;
+grant select, insert, update, delete on all tables in schema public to bot_service;
+grant usage, select on all sequences in schema public to bot_service;
+
+-- Auto-apply privileges to any future tables/sequences created in the schema
+alter default privileges in schema public
+  grant select, insert, update, delete on tables to bot_service;
+alter default privileges in schema public
+  grant usage, select on sequences to bot_service;
