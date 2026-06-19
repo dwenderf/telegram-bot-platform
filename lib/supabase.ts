@@ -17,11 +17,10 @@ export const sql =
     max: 10, // Maintain a small pool size to prevent connection exhaustion in serverless
     idle_timeout: 20, // Close idle connections after 20 seconds
     connect_timeout: 10, // Wait up to 10 seconds to connect
+    prepare: false, // Supavisor transaction pooler (6543) does not support prepared statements
   });
 
-if (process.env.NODE_ENV !== 'production') {
-  globalForDb.conn = sql;
-}
+globalForDb.conn = sql;
 
 /**
  * Executes database operations inside a transaction with RLS scoped to a specific entity.
