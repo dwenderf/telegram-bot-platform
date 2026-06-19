@@ -43,3 +43,6 @@ next-env.d.ts
 .qodo/
 .vscode/
 .idea/
+
+# Supabase CLI local state
+supabase/.temp/

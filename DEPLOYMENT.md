@@ -30,12 +30,23 @@ Local tooling:
 1. Create a new Supabase project. Note the **project ref**, region, and the database password you set.
 2. From **Project Settings → Database**, collect the connection details (host, port, database name). You'll build the `bot_service` connection string from these in A6.
 
-## A3. Enable the Vault extension
+> **Project-creation options — leave these OFF:**
+> - **"Enable automatic RLS"** (the event trigger that auto-enables RLS on every new `public` table): **do not enable.** This platform's RLS is **explicit and intentional in the migration** — each table is `enable`d + `force`d with specific `USING`/`WITH CHECK` policies you can read in one file (`supabase/migrations/...`). That explicitness is what makes the security model auditable (see `SECURITY-PROPOSAL.md`). An auto-enable trigger is redundant and *risky*: it enables RLS but creates **no policies**, and a table with RLS-on-but-no-policies denies all access by default — which can produce confusing "permission denied / zero rows" failures on any future table, traceable only to an invisible project-level trigger. Keep RLS the migration's job, not a background trigger's.
+> - **GitHub repo integration** (linking this repo so Supabase auto-runs migrations on push): **skip it, at least for the first deploy.** Migrations must run *after* the `bot_service` role exists (A4 → A5 ordering); an auto-apply-on-push integration could run the migration before the role exists and fail. Run migrations **manually** (A5) so you control the timing. (This is unrelated to the per-tenant *content-repo* webhooks in Part B — those are a different thing and are required.)
 
-The migration references `vault.secrets` and `vault.decrypted_secrets`, so **Vault must be enabled before running it.**
+## A3. Verify Vault is available (usually no action needed)
 
-- In the Supabase dashboard: **Database → Extensions**, enable **`supabase_vault`** (Vault). (On most Supabase projects Vault is available; confirm it's enabled.)
-- `[VERIFY]` Confirm the `vault` schema and `vault.decrypted_secrets` view exist in your project before proceeding.
+The migration references `vault.secrets` and `vault.decrypted_secrets`. **On current Supabase projects Vault ships already provisioned** (the `supabase_vault` extension, pgsodium-free as of v0.3.x — verified on this project). So this step is normally **verify, not create**:
+
+```sql
+select extname, extversion from pg_extension where extname = 'supabase_vault';
+select * from vault.secrets limit 1;            -- should run (0 rows is fine)
+select * from vault.decrypted_secrets limit 1;  -- should run (0 rows is fine)
+```
+
+- If those queries succeed, Vault is ready — proceed to A4.
+- Only if `vault.secrets` errors with "relation does not exist" do you need to enable it: `create extension if not exists supabase_vault;` (and on current projects you generally won't).
+- **Note:** the Supabase dashboard's Extensions list can be confusing here — Vault's underlying crypto historically showed as `pgsodium`, and current projects are pgsodium-*free*, so don't go hunting for a `supabase_vault` toggle. The SQL check above is the reliable confirmation.
 
 ## A4. Create the `bot_service` role (BEFORE the migration)
 
@@ -59,25 +70,22 @@ Apply `supabase/migrations/20260618000000_init_schema.sql`. This creates all tab
 
 > Reminder: this step **will fail** if A3 (Vault) or A4 (`bot_service` role) haven't been done — both are prerequisites.
 
-## A6. Grant table privileges to `bot_service` (REQUIRED — not in the migration)
+## A6. Table privileges for `bot_service` (now handled by the migration)
 
-⚠️ **This step is essential and is NOT included in the migration.** The migration grants only `EXECUTE` on the four functions. It does **not** grant table-level `SELECT/INSERT/UPDATE/DELETE` to `bot_service`. Without these grants, RLS is configured but the role has no base privilege to touch the tables at all — the app will fail with permission errors despite a correct security model.
+✅ **No action needed here** — table privileges are granted **inside the migration** (section 5, after the `grant execute` lines): `usage` on schema, `select/insert/update/delete` on all tables, sequence usage, and `alter default privileges` for future tables. So A5 already gave `bot_service` the base privileges it needs.
 
-`[VERIFY]` Confirm whether Antigravity intends these grants to live in the migration (preferred — they should) or as a separate setup step. Until they're in the migration, run this after A5:
+> Context: table privilege and row-level policy are two distinct layers — the grant lets the role *address* the tables; RLS (with `USING` + `WITH CHECK`) scopes it to its tenant. Both are required, and both are now in the migration. (Earlier drafts required a manual grant step here; that gap was closed — see BACKLOG B0.)
 
-```sql
-grant usage on schema public to bot_service;
-
-grant select, insert, update, delete on
-  entities, groups, users, memberships, manifest_entries,
-  doc_cache, message_log, processed_updates
-to bot_service;
-
--- message_log uses a bigserial PK, so its sequence needs usage
-grant usage, select on all sequences in schema public to bot_service;
-```
-
-> **Recommendation (BACKLOG item):** fold these grants into the migration itself so a fresh deploy is one step and can't be forgotten. Granting on tables is correct here precisely *because* RLS still constrains which rows the role can see/write — table privilege and row policy are two different layers, and both are needed.
+> Verify the grants applied (works in the SQL editor):
+> ```sql
+> select grantee, table_name, privilege_type
+> from information_schema.role_table_grants
+> where grantee = 'bot_service'
+> order by table_name, privilege_type;
+> ```
+> Expect **32 rows** — all 8 tables (`entities`, `groups`, `users`, `memberships`, `manifest_entries`, `doc_cache`, `message_log`, `processed_updates`) × 4 privileges (SELECT/INSERT/UPDATE/DELETE). If they're present, the grants worked.
+>
+> **Do NOT use `set role bot_service` in the Supabase SQL editor** — it fails with `permission denied to set role "bot_service"`, because the SQL editor's role isn't a member of `bot_service`. That's an editor limitation, not a grant problem. The `information_schema` query above is the correct in-editor check. (The authoritative end-to-end test is connecting *as* `bot_service` via the app's `DATABASE_URL` — which the A7 deploy + A9 smoke test exercises.)
 
 ## A7. Deploy the app to Vercel
 
@@ -86,9 +94,26 @@ grant usage, select on all sequences in schema public to bot_service;
 
    | Variable | Value | Notes |
    |---|---|---|
-   | `DATABASE_URL` | `postgres://bot_service:PASSWORD@db.PROJECT_REF.supabase.co:5432/postgres` | **Must be the `bot_service` role**, not `postgres`. Mark **Sensitive** in Vercel. |
+   | `DATABASE_URL` | the **transaction-mode pooler** string (see below) | **Must be the `bot_service` role**, not `postgres`. Mark **Sensitive** in Vercel. |
    | `ANTHROPIC_API_KEY` | your Anthropic key | Mark Sensitive. |
-   | `GITHUB_WEBHOOK_SECRET` | a strong random secret you generate | **Global** signing secret for the GitHub sync webhook (shared across all tenants — see B7). Mark Sensitive. |
+   | `GITHUB_WEBHOOK_SECRET` | a strong shared secret | **Global** signing secret for the GitHub sync webhook (shared across all tenants — see B7). Generate via a password manager (a passphrase is fine — GitHub accepts any string); **save it** — you re-enter this same value into every tenant's GitHub webhook (B7). Mark Sensitive. |
+
+   > **⚠️ `DATABASE_URL` MUST be the transaction-mode POOLER string, not the direct connection.** This bit us on the first deploy: the **direct** connection host (`db.PROJECT_REF.supabase.co:5432`) is **unreachable from Vercel** — the function crashes with `getaddrinfo ENOTFOUND db.PROJECT_REF.supabase.co` (the direct host is IPv6-oriented and serverless can't resolve/reach it). Use the **Supavisor transaction pooler** instead. Get it from **Supabase → Project Settings → Database → Connection string → "Connection pooling" / Transaction mode**. It differs from the direct string in three ways:
+   > - **Host:** `aws-<n>-<region>.pooler.supabase.com` (e.g. `aws-1-us-west-2.pooler.supabase.com`), not `db.<ref>.supabase.co`
+   > - **Port:** `6543` (transaction mode), not `5432`
+   > - **Username:** the project ref is appended to the role — **`bot_service.PROJECT_REF`** (e.g. `bot_service.eomnjhbjrkfcpzzbcdho`), not bare `bot_service`
+   >
+   > The dashboard shows the pooler string with the `postgres` user — **swap `postgres` → `bot_service`** (keeping the `.PROJECT_REF` suffix) and use the **`bot_service` password** (the one from A4, in your password manager — NOT the project/postgres database password; the username and password must be for the same role). Final form:
+   > ```
+   > postgresql://bot_service.PROJECT_REF:BOT_SERVICE_PASSWORD@aws-<n>-<region>.pooler.supabase.com:6543/postgres
+   > ```
+   > (`postgres://` and `postgresql://` are identical schemes — either works; that is NOT the issue if a connection fails.)
+
+   > **⚠️ Code requirement: `prepare: false` for the transaction pooler.** The `postgres` npm client (`lib/supabase.ts`) uses prepared statements by default, which the Supavisor **transaction** pooler (port 6543) does NOT support. After fixing the host, a successful connection will then fail *queries* with a prepared-statement error unless `lib/supabase.ts` initializes the client with `prepare: false`:
+   > ```js
+   > postgres(connectionString, { max: 10, idle_timeout: 20, connect_timeout: 10, prepare: false })
+   > ```
+   > (Alternative: use the **session** pooler on port 5432, which supports prepared statements — but transaction mode + `prepare: false` is the right choice for serverless. Confirm `prepare: false` is set before relying on the deploy.)
 
    > `[VERIFY]` These three are the only env vars the current code reads (`lib/supabase.ts` → `DATABASE_URL`; `lib/anthropic.ts` → `ANTHROPIC_API_KEY`; the GitHub sync route → `GITHUB_WEBHOOK_SECRET`). The unused `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` are intentionally NOT used (see `.env.example`). Confirm no other env var has been introduced before relying on this list.
 
@@ -102,10 +127,38 @@ grant usage, select on all sequences in schema public to bot_service;
 
 > All tenant webhook URLs will be built on this domain (`https://api.kenntnis.ai/api/webhooks/...`), so they stay stable and owned by you regardless of the underlying Vercel deployment.
 
-## A9. Platform smoke test
+## A9. Platform smoke test (curl — verified)
 
-- Confirm the app responds at the domain.
-- `[VERIFY]` There's a `checkVaultSecretsHealth(entityId)` capability in `lib/capabilities.ts`, but no route currently exposes it. Consider adding a small admin/health endpoint that runs it per entity (BACKLOG), so you can verify an entity's Vault references resolve before going live. Until then, the first real `/ask` (B8) is the end-to-end test.
+These three curls confirm the app is deployed, routing, authenticating, and — critically — **reaching the database**, all *before* any tenant exists. Run them against the live domain; watch the **Vercel logs** alongside (Dashboard → project → Logs) for the definitive signal.
+
+**1. Endpoint alive (no DB):**
+```bash
+curl -i https://api.kenntnis.ai/api/webhooks/github/sync
+```
+Expect **405** (GET on a POST route) — confirms the route exists and the app is serving (not a 404).
+
+**2. GitHub auth works (no DB):**
+```bash
+curl -i -X POST https://api.kenntnis.ai/api/webhooks/github/sync \
+  -H "Content-Type: application/json" -d '{"test": true}'
+```
+Expect **401** (invalid/missing signature). Log: `Unauthorized GitHub sync attempt (invalid signature)`. A *clean* 401 (not a 500) confirms the handler runs and its HMAC check works.
+
+**3. Database connection works (this one hits Postgres):**
+```bash
+curl -i -X POST https://api.kenntnis.ai/api/webhooks/telegram/nonexistent \
+  -H "Content-Type: application/json" \
+  -H "x-telegram-bot-api-secret-token: wrong" \
+  -d '{"update_id": 1, "message": {"text": "test"}}'
+```
+The bogus slug `nonexistent` forces a `resolve_entity_id_by_slug` lookup — which **requires a working DB connection**. Interpreting the result:
+- **404 + log `Webhook triggered for unknown tenant slug: nonexistent`** → ✅ the DB was queried, no such entity, clean rejection. **`DATABASE_URL` (pooler) is confirmed working end to end.**
+- **500 + log `getaddrinfo ENOTFOUND db.PROJECT_REF.supabase.co`** → `DATABASE_URL` is still the **direct** connection; fix it to the pooler string (see A7).
+- **500 + a prepared-statement error** → add `prepare: false` to `lib/supabase.ts` (see A7).
+
+When test 3 returns a clean 404 with the "unknown tenant slug" log line, **Part A is verified complete** — platform deployed, domain live, database reachable via the pooler.
+
+> `[VERIFY]` (nice-to-have) There's a `checkVaultSecretsHealth(entityId)` capability in `lib/capabilities.ts` with no route exposing it. A small admin/health endpoint running it per entity would let you verify an entity's Vault references resolve before going live (BACKLOG). Until then, the first real `/ask` (B9) is the per-tenant end-to-end test.
 
 Platform setup is complete. Everything below is per-tenant.
 
@@ -246,15 +299,22 @@ Tenant is live. Repeat Part B for the next entity.
 
 **The three `SECURITY DEFINER` functions** (the only sanctioned RLS-bypass surfaces): `resolve_entity_id_by_slug`, `resolve_entity_id_by_repo`, `get_current_entity_secret`. See `SECURITY-PROPOSAL.md`.
 
-**Prerequisite ordering (the parts that bite if done out of order):** Vault enabled → `bot_service` role created → migration run → table grants → app deployed → domain live → webhooks registered.
+**Prerequisite ordering (the parts that bite if done out of order):** Vault verified → `bot_service` role created → migration run (grants included) → app deployed (pooler `DATABASE_URL`) → domain live → webhooks registered.
 
 ---
 
 ## Open items this guide surfaced (for BACKLOG / Antigravity confirmation)
 
-- **Table privilege grants are missing from the migration** (A6) — fold `GRANT SELECT/INSERT/UPDATE/DELETE ... TO bot_service` (and sequence usage) into the migration so a fresh deploy is complete in one step. *This is the most important gap — without it the app cannot touch the tables.*
+- **`prepare: false` in `lib/supabase.ts`** (A7) — required for the Supavisor transaction pooler (port 6543); without it, queries fail with prepared-statement errors once connected. Confirm it's set in the client init.
 - **No cache-rebuild / seed endpoint** (B6) — initial doc-cache population relies on triggering the GitHub webhook. A standalone "rebuild entity cache from repo" admin function would make onboarding and recovery cleaner.
 - **`checkVaultSecretsHealth` is not exposed via any route** (A9) — wire it to a small admin/health endpoint for pre-launch verification.
 - **Entity-creation RLS path** (B5) — document/confirm that initial entity creation is a privileged admin action (SQL editor as `postgres`), since `bot_service` + `WITH CHECK` cannot bootstrap the first row of a new entity.
 - **`package.json` name is still `temp-next`** — rename to the project.
-- **Vault insertion API** (B3) and **migration-application method** (A5) — confirm exact commands for the current Supabase version / intended workflow.
+- **Vault insertion API** (B3) — confirm exact `vault.create_secret(secret, name)` signature for the current Supabase version (to be verified during the first Part B onboarding).
+
+### Resolved during first deploy (2026-06-19)
+- **Table-privilege grants** — now in the migration (BACKLOG B0); A5 produces a working role in one step. Verified: 32 grant rows.
+- **Migration application** — `npx supabase db push` used successfully (after `bot_service` role created first).
+- **Vault** — already provisioned (v0.3.1, pgsodium-free); verify-not-create (A3).
+- **`DATABASE_URL`** — must be the transaction-mode pooler string, not direct (A7); direct host fails `ENOTFOUND` from Vercel.
+- **A6 sanity check** — `set role` fails in the SQL editor; use the `information_schema.role_table_grants` query.
