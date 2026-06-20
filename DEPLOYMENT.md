@@ -2,7 +2,12 @@
 
 > How to stand up the Kenntnis platform from scratch and onboard your first tenant. This is the operational runbook; for *what* the system is and *why* it's built this way, see `README.md` (overview) and `PLANNING.md` (architecture).
 
-> **Structure:** **Part A** is one-time platform setup (do once). **Part B** is per-tenant onboarding (repeat for each entity — HYS, SymRes, etc.). The multi-tenant design means Part A is never repeated; adding a tenant is only Part B.
+> **Structure — three flows:**
+> - **Part A** — one-time **platform** setup (do once, ever).
+> - **Part B** — onboard a **new entity** (new tenant): creates the entity + its first group + its bot + content repo + secrets + webhooks. Repeat per entity (HYS, SymRes, Theäta…).
+> - **Part C** — add **another group to an existing entity** (e.g. a second HYS group). Lightweight: reuses the entity's existing bot, repo, and webhook — just a new Telegram group + one `groups` row. No new entity/bot/repo/webhook.
+>
+> The multi-tenant design means Part A is never repeated; a new tenant is Part B; an additional group under an existing tenant is Part C.
 
 > **Ordering matters.** Several steps are prerequisites for later ones (the `bot_service` role must exist *before* the migration; Vault must be enabled *before* the migration; Vercel must be deployed *before* you can register webhooks). Follow the order as written.
 
@@ -164,9 +169,11 @@ Platform setup is complete. Everything below is per-tenant.
 
 ---
 
-# Part B — Per-Tenant Onboarding (repeat per entity)
+# Part B — Onboard a New Entity (new tenant)
 
-> Example uses HYS. Repeat for SymRes, Theäta, etc. Each tenant = its own Telegram bot, its own content repo, one entity row, one or more group rows, manifest entries, and Vault secrets.
+> Use this flow to onboard a **brand-new entity** (tenant). It creates the entity, its **first** group, its bot, content repo, secrets, and webhooks. Example uses HYS (first group: "HYS Internal"). Repeat the whole flow per *new* entity (SymRes, Theäta, …).
+>
+> **Adding a *second* group to an entity that already exists** (e.g. "HYS Board" alongside "HYS Internal") is **not** this flow — it's the much shorter **Part C**, which reuses the entity's existing bot/repo/webhook.
 
 ## B1. Create the Telegram bot (BotFather)
 
@@ -189,9 +196,10 @@ Insert each secret into Vault and capture its returned `id` (UUID). Run in the S
 
 ```sql
 -- Returns the UUID of the stored secret; capture each one.
-select vault.create_secret('THE_BOT_TOKEN',         'hys_telegram_bot_token');
-select vault.create_secret('THE_WEBHOOK_SECRET',    'hys_telegram_webhook_secret');
-select vault.create_secret('THE_GITHUB_PAT',        'hys_github_token');
+-- The second argument is the secret's NAME — use something meaningful for THIS tenant.
+select vault.create_secret('THE_BOT_TOKEN',      'your_new_telegram_bot_token');
+select vault.create_secret('THE_WEBHOOK_SECRET', 'your_new_telegram_webhook_secret');
+select vault.create_secret('THE_GITHUB_PAT',     'your_entity_github_pat');
 ```
 
 `[VERIFY]` Confirm the exact Vault insertion API for your Supabase version (`vault.create_secret(secret, name)` is the common signature; some versions differ). Record the three returned UUIDs for B5.
@@ -224,11 +232,16 @@ returning id;
 
 `[VERIFY]` **RLS on insert:** because `entities` has a `WITH CHECK` policy keyed on `app.current_entity_id`, inserting a *new* entity is a chicken-and-egg case (the id doesn't exist yet to set in the session). Confirm how Antigravity intends initial entity creation to happen — most likely it's an **admin action run as a privileged role** (the Supabase SQL editor connects as `postgres`, which bypasses RLS, so the insert works there). This is fine for manual onboarding: entity *creation* is a privileged admin operation; only the *running app* uses `bot_service`. Document this clearly so no one tries to create entities via the `bot_service` connection.
 
-Then capture the returned `entity_id` and insert the group(s):
+Then capture the returned `entity_id` and insert the **first** group (e.g. "HYS Internal"):
+
+> **About the `slug`** (`'hys'` above) — it's the **routing key**, not just a label, so it has real requirements:
+> - **Unique** — enforced by the schema (`slug ... unique`). It's the URL Telegram delivers to (`/api/webhooks/telegram/{slug}`) and what `resolve_entity_id_by_slug` maps to a single entity. A duplicate insert is rejected outright by the constraint.
+> - **URL-safe** — it goes directly into a URL path, so use **lowercase letters, digits, and hyphens only** (e.g. `hys`, `symres`, `hys-studios`). No spaces, uppercase, or special characters.
+> - **Stable** — it's baked into the registered Telegram webhook URL (B8), so changing it later means re-registering the webhook. Choose it deliberately at creation (short, clear, permanent). The `display_name` (`'Hudson Yards Studios'`) is the human-facing label and *can* change freely; the slug is the technical identifier and shouldn't.
 
 ```sql
 insert into groups (entity_id, telegram_chat_id, display_name)
-values ('THE_ENTITY_ID', -1001234567890, 'HYS Board');
+values ('THE_ENTITY_ID', -1001234567890, 'HYS Internal');
 ```
 
 > `telegram_chat_id` is the supergroup's chat id (large negative number). Get it from the Telegram API or a quick `getUpdates` call after the bot is in the group.
@@ -283,7 +296,45 @@ curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \
 3. `@mention` the bot with a question → same as `/ask`.
 4. Edit a context doc → PR → merge to `main` → confirm the GitHub sync updates `doc_cache` (the next `/ask` reflects the change).
 
-Tenant is live. Repeat Part B for the next entity.
+Tenant is live. Repeat Part B for the next *entity*; use **Part C** to add another *group* to this entity.
+
+---
+
+# Part C — Add a Group to an Existing Entity
+
+> For when an entity already exists (onboarded via Part B) and you want to add **another Telegram group** under it — e.g. "HYS Board" alongside "HYS Internal". Because Telegram has **no per-topic user permissions**, separating audiences requires separate *groups*; the platform's `entity (1)—(N) group` model handles this by attaching multiple groups to one entity. This flow is short: **the same bot, repo, webhook, and entity are reused** — you're only adding a Telegram group and one database row.
+
+> **Why no new bot/repo/webhook:** the entity already has its bot (whose single webhook points at the entity slug) and its content repo. The Telegram handler resolves the *group* from the incoming `chat_id` and the *entity* from the slug, so one bot in multiple groups routes correctly. (Decision: **one bot per entity, serving all its groups** — see `PLANNING.md` §9.)
+
+## C1. Create the new Telegram group
+
+1. Create the new supergroup with **Topics/forum enabled**.
+2. **Add the entity's existing bot** to it (the same bot from Part B — already created, privacy already disabled). When adding, **type the bot's full username** — a bot may not appear in `@`-autocomplete if Telegram hasn't cached it yet.
+   - `[VERIFY]` Privacy mode is a per-bot BotFather setting, so it *should* already apply in the new group. Confirm by sending a plain (non-command) message in a topic and checking a `message_log` row appears (after C2).
+
+## C2. Insert the group row (the core of this flow)
+
+Get the new group's `telegram_chat_id` (e.g. from a `getUpdates` call after the bot is in the group), then insert **one row** referencing the **existing** entity:
+
+```sql
+insert into groups (entity_id, telegram_chat_id, display_name)
+values ('THE_EXISTING_ENTITY_ID', -100<new_group_chat_id>, 'HYS Board');
+```
+
+That's it for wiring — no Vault secrets, no repo, no webhook, no entity. The existing bot's webhook already routes messages from this group (the handler resolves the group by `chat_id`).
+
+## C3. (Optional) Scope context per group
+
+If the two groups should see **different** content (e.g. HYS Board must not see internal-only docs), that requires **group-scoped context resolution**, which is **not built in v1** (see `PLANNING.md` §9). The `manifest_entries.group_id` column exists for this, but v1's resolution logic ignores it — so **until group-scoping is built, all groups under the entity share the same (entity-general + per-topic) context.**
+
+- **If shared content is fine** (both groups see the same HYS knowledge): nothing to do — the existing manifest applies to the new group automatically.
+- **If you need separation now:** group-scoped resolution must be built first; that is the concrete feature this multi-audience use case drives.
+
+## C4. Test
+
+In a topic of the new group, send `/ask <a question answerable from the entity's context>` → expect the 👀 reaction, typing, then an answer in-thread. (No webhook setup was needed — the existing bot already delivers here.) Confirm a plain message also logs to `message_log` (validates privacy mode is effective in this group).
+
+The new group is live under the existing entity.
 
 ---
 
