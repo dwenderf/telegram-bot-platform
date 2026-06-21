@@ -4,8 +4,8 @@
 
 > **Structure — three flows:**
 > - **Part A** — one-time **platform** setup (do once, ever).
-> - **Part B** — onboard a **new entity** (new tenant): creates the entity + its first group + its bot + content repo + secrets + webhooks. Repeat per entity (HYS, SymRes, Theäta…).
-> - **Part C** — add **another group to an existing entity** (e.g. a second HYS group). Lightweight: reuses the entity's existing bot, repo, and webhook — just a new Telegram group + one `groups` row. No new entity/bot/repo/webhook.
+> - **Part B** — onboard a **new entity** (new tenant): creates the entity + its first group + its bot + secrets + content (pushed directly into the cache) + the Telegram webhook. Repeat per entity (HYS, SymRes, Theäta…).
+> - **Part C** — add **another group to an existing entity** (e.g. a second HYS group). Lightweight: reuses the entity's existing bot, content, and webhook — just a new Telegram group + one `groups` row. No new entity/bot/content/webhook.
 >
 > The multi-tenant design means Part A is never repeated; a new tenant is Part B; an additional group under an existing tenant is Part C.
 
@@ -171,24 +171,28 @@ Platform setup is complete. Everything below is per-tenant.
 
 # Part B — Onboard a New Entity (new tenant)
 
-> Use this flow to onboard a **brand-new entity** (tenant). It creates the entity, its **first** group, its bot, content repo, secrets, and webhooks. Example uses HYS (first group: "HYS Internal"). Repeat the whole flow per *new* entity (SymRes, Theäta, …).
+> Use this flow to onboard a **brand-new entity** (tenant). It creates the entity, its **first** group, its bot, secrets, and its content (pushed directly into the cache). Example uses HYS (first group: "HYS Internal"). Repeat the whole flow per *new* entity (SymRes, Theäta, …).
 >
-> **Adding a *second* group to an entity that already exists** (e.g. "HYS Board" alongside "HYS Internal") is **not** this flow — it's the much shorter **Part C**, which reuses the entity's existing bot/repo/webhook.
+> **v1 content model:** content lives **directly in the `doc_cache` table** — there is **no GitHub** in the v1 path. (The store is abstracted; GitHub/Drive/other sources can plug in later as optional sync-sources that populate the same cache — see `PLANNING.md`. The GitHub-sync code exists but is not used in v1.)
+>
+> **Adding a *second* group to an entity that already exists** (e.g. "HYS Board" alongside "HYS Internal") is **not** this flow — it's the much shorter **Part C**, which reuses the entity's existing bot, content, and webhook.
 
 ## B1. Create the Telegram bot (BotFather)
 
-1. In Telegram, message **@BotFather** → `/newbot`. Set a name and a username (the username must end in `bot`, e.g. `kenntnis_hys_bot`).
+1. In Telegram, message **@BotFather** → `/newbot`. Set a name (the human-facing **display name**, free-form) and a **username** (must end in `bot`/`Bot` — case-insensitive; Latin letters/digits/underscores; 5–32 chars; globally unique). E.g. display name "HYS Assistant", username `kenntnis_hys_bot`.
 2. Save the **bot token** BotFather gives you.
-3. **Disable privacy mode:** BotFather → `/setprivacy` → select the bot → **Disable**. (Required so the bot can see group messages / @mentions, not just commands.)
-4. Add the bot to the target Telegram **supergroup** (the one with Topics/forum enabled). It should be a regular member; it does not need admin.
-5. Record the bot's exact **username** (bare, no `@`) — it's stored in the entity row and used for mention detection.
+3. **Disable privacy mode — required:** BotFather → `/setprivacy` → select the bot → **Disable**. With privacy ON (the default), the bot only receives commands/mentions/replies, **not ordinary group messages** — so the recent-conversation feature silently degrades (the bot answers but can't reflect the live discussion). **Ordering gotcha:** privacy mode only applies to groups the bot joins *after* the setting is changed. So disable privacy **before** adding the bot to the group; if the bot is already in the group, **remove and re-add it**.
+4. Add the bot to the target Telegram **supergroup** (Topics/forum enabled), as a regular member (no admin needed). **Autocomplete gotcha:** a freshly-created bot often isn't cached yet, so it may not appear when you type `@` — **type the full username** explicitly.
+5. Record the bot's exact **username** (bare, no `@`) — it's stored in the entity row and used for mention detection (matching is case-insensitive).
+6. **Confirm privacy is off:** send a plain (non-command) message in a topic; after B4/B5 it should produce a `message_log` row. (Quick early check via B3's chat-id step: if a *plain, untagged* message shows up in `getUpdates`, privacy is correctly off — if you must tag the bot to get an update, privacy is still on.)
 
 ## B2. Generate the per-tenant secrets
 
-You'll store three secrets for this tenant in Vault (B3):
+v1 stores **two** secrets for this tenant in Vault (B3):
 - **Telegram bot token** (from B1).
 - **Telegram webhook secret** — generate a strong random hex string, e.g. `openssl rand -hex 32 | tr -d '\n'`. (The `tr -d '\n'` matters — a trailing newline silently breaks the header comparison. Known footgun.)
-- **GitHub token** — a fine-grained PAT scoped to *this tenant's content repo only* (Contents: read; add Pull requests: read/write later when write-commands ship). Per-tenant scoping keeps the platform's GitHub access tenant-isolated.
+
+*(No GitHub PAT in v1 — content is pushed directly into the cache in B5, so there is no GitHub token to create, scope, or rotate. The `github_token_id` column stays null.)*
 
 ## B3. Store the secrets in Supabase Vault
 
@@ -199,25 +203,22 @@ Insert each secret into Vault and capture its returned `id` (UUID). Run in the S
 -- The second argument is the secret's NAME — use something meaningful for THIS tenant.
 select vault.create_secret('THE_BOT_TOKEN',      'your_new_telegram_bot_token');
 select vault.create_secret('THE_WEBHOOK_SECRET', 'your_new_telegram_webhook_secret');
-select vault.create_secret('THE_GITHUB_PAT',     'your_entity_github_pat');
 ```
 
-`[VERIFY]` Confirm the exact Vault insertion API for your Supabase version (`vault.create_secret(secret, name)` is the common signature; some versions differ). Record the three returned UUIDs for B5.
+> ✅ **Verified (first onboarding):** `vault.create_secret(secret, name)` works as written and returns the secret's UUID. Record the two UUIDs for B4.
 
 > Note: `bot_service` cannot read these directly (no grant on `vault.decrypted_secrets`); it can only decrypt its own entity's secrets via `get_current_entity_secret`, and only inside an RLS session. Inserting secrets here is an admin action done as a privileged role in the SQL editor.
 
-## B4. Prepare the content repo
+## B4. Insert the entity + group rows
 
-1. Create (or designate) this tenant's **GitHub content repo**, e.g. `dwenderf/hys-context`. This holds the markdown docs the bot answers from.
-2. Create a `context/` directory (matches the default `context_root`) with at least one general doc, e.g. `context/overview.md`.
-3. Ensure the per-tenant GitHub PAT (B2) has access to this repo.
-
-## B5. Insert the entity + group rows
-
-These writes go to RLS-protected tables, so they must run **inside the entity's session context.** The cleanest way is to set the session and insert in one transaction. In the SQL editor:
+Run in the SQL editor (which connects as `postgres` and **bypasses RLS** — this is the correct path for entity creation; see the note below).
 
 ```sql
--- Insert the entity, referencing the three Vault secret UUIDs from B3.
+-- Insert the entity, referencing the two Vault secret UUIDs from B3.
+-- NOTE: github_* columns are NOT NULL in the schema, so values are required even
+-- though v1 doesn't use GitHub. They're unused in the v1 path (only the unused
+-- GitHub-sync route reads them). Supply nominal values (the repo you'd use later,
+-- or placeholders). github_token_id is nullable → leave null in v1.
 insert into entities (
   slug, display_name, github_owner, github_repo, github_branch, context_root,
   telegram_bot_username, excluded_thread_ids,
@@ -225,57 +226,65 @@ insert into entities (
 ) values (
   'hys', 'Hudson Yards Studios', 'dwenderf', 'hys-context', 'main', 'context',
   'kenntnis_hys_bot', '{}',
-  'BOT_TOKEN_SECRET_UUID', 'WEBHOOK_SECRET_UUID', 'GITHUB_TOKEN_UUID'
+  'BOT_TOKEN_SECRET_UUID', 'WEBHOOK_SECRET_UUID', null
 )
 returning id;
 ```
 
-`[VERIFY]` **RLS on insert:** because `entities` has a `WITH CHECK` policy keyed on `app.current_entity_id`, inserting a *new* entity is a chicken-and-egg case (the id doesn't exist yet to set in the session). Confirm how Antigravity intends initial entity creation to happen — most likely it's an **admin action run as a privileged role** (the Supabase SQL editor connects as `postgres`, which bypasses RLS, so the insert works there). This is fine for manual onboarding: entity *creation* is a privileged admin operation; only the *running app* uses `bot_service`. Document this clearly so no one tries to create entities via the `bot_service` connection.
-
-Then capture the returned `entity_id` and insert the **first** group (e.g. "HYS Internal"):
+> ✅ **Verified (first onboarding):** the entity insert succeeds in the SQL editor and returns the `id`. Because the editor connects as `postgres` (superuser), it bypasses the `WITH CHECK` RLS policy — which is why entity *creation* works here even though `bot_service` couldn't bootstrap a brand-new entity's first row. **Entity creation is a privileged admin action; only the running app uses `bot_service`.** (Future: an admin function/UI will do this insert programmatically as a privileged role — see `PLANNING.md` §9.)
 
 > **About the `slug`** (`'hys'` above) — it's the **routing key**, not just a label, so it has real requirements:
 > - **Unique** — enforced by the schema (`slug ... unique`). It's the URL Telegram delivers to (`/api/webhooks/telegram/{slug}`) and what `resolve_entity_id_by_slug` maps to a single entity. A duplicate insert is rejected outright by the constraint.
 > - **URL-safe** — it goes directly into a URL path, so use **lowercase letters, digits, and hyphens only** (e.g. `hys`, `symres`, `hys-studios`). No spaces, uppercase, or special characters.
-> - **Stable** — it's baked into the registered Telegram webhook URL (B8), so changing it later means re-registering the webhook. Choose it deliberately at creation (short, clear, permanent). The `display_name` (`'Hudson Yards Studios'`) is the human-facing label and *can* change freely; the slug is the technical identifier and shouldn't.
+> - **Stable** — it's baked into the registered Telegram webhook URL (B6), so changing it later means re-registering the webhook. Choose it deliberately at creation (short, clear, permanent). The `display_name` (`'Hudson Yards Studios'`) is the human-facing label and *can* change freely; the slug is the technical identifier and shouldn't.
+
+Then capture the returned `entity_id` and insert the **first** group (e.g. "HYS Internal"):
 
 ```sql
 insert into groups (entity_id, telegram_chat_id, display_name)
 values ('THE_ENTITY_ID', -1001234567890, 'HYS Internal');
 ```
 
-> `telegram_chat_id` is the supergroup's chat id (large negative number). Get it from the Telegram API or a quick `getUpdates` call after the bot is in the group.
+> **Getting `telegram_chat_id` (and topic `message_thread_id`).** The chat id is a large negative number (supergroups look like `-1001234567890`). Two practical ways:
+> - **Easiest — a get-ID utility bot:** add a reputable ID bot (e.g. `@RawDataBot`, `@getidsbot`) to the group; it immediately replies with the chat id **and** the topic/thread ids. Read them, then **remove the bot**. (Don't do this in a group with sensitive live discussion; for a fresh onboarding group it's fine.) This also gives you the `message_thread_id` values for any per-topic manifest entries (B5).
+> - **Alternative — `getUpdates` (before the webhook is set):** send a message in the group, then `curl "https://api.telegram.org/bot<BOT_TOKEN>/getUpdates"` and read `message.chat.id`. ✅ **Verified:** works on **any** message the bot receives — with privacy off, even a plain *untagged* message suffices (no need to tag the bot; if you *do* have to tag it, privacy is still on). **Gotcha:** `getUpdates` only works while **no webhook is set** — once you run `setWebhook` (B6), it errors. So do this *before* B6 (which you are, here).
 
-## B6. Seed the manifest + initial context
+## B5. Bootstrap content into the cache + manifest
 
-1. Push the content docs to the repo's `context/` dir (B4) and merge to `main`.
-2. Insert manifest entries mapping topics → docs. For v1 (entity-general + per-topic):
+The bot answers from `doc_cache`. In v1 you push content **directly** into it (no GitHub sync). Run in the SQL editor as `postgres`.
 
 ```sql
--- Entity-general doc (thread_id NULL = loads for every topic)
-insert into manifest_entries (entity_id, telegram_thread_id, doc_path)
-values ('THE_ENTITY_ID', null, 'context/overview.md');
+-- 1. Push a context doc directly into the cache.
+--    doc_cache.content is NOT NULL — real content required (no empty docs, or the
+--    bot will have nothing to answer from). $doc$...$doc$ dollar-quoting lets the
+--    markdown contain apostrophes/quotes freely. on conflict makes it re-runnable.
+insert into doc_cache (entity_id, doc_path, content, git_sha)
+values (
+  'THE_ENTITY_ID',
+  'context/overview.md',
+  $doc$
+# Hudson Yards Studios — Overview
 
--- (Optional) a per-topic doc: thread_id = the Telegram topic's message_thread_id
-insert into manifest_entries (entity_id, telegram_thread_id, doc_path)
-values ('THE_ENTITY_ID', 78, 'context/some-topic.md');
+<your real HYS content here — replace entirely. A few solid paragraphs of real
+info the bot should be able to answer from.>
+  $doc$,
+  null    -- git_sha nullable; null for directly-pushed (non-Git) content
+)
+on conflict (entity_id, doc_path)
+do update set content = excluded.content, synced_at = now();
+
+-- 2. Map it as an ENTITY-GENERAL doc (loads for every topic): telegram_thread_id = null.
+--    (Run once — manifest_entries has no unique constraint on these columns, so
+--    re-running would create duplicates.)
+insert into manifest_entries (entity_id, group_id, telegram_thread_id, doc_path)
+values ('THE_ENTITY_ID', null, null, 'context/overview.md');
 ```
 
-3. **Populate the cache.** The bot reads from `doc_cache`, not GitHub directly — so the docs must be synced into the cache. Two ways:
-   - Trigger the GitHub sync (B7) by pushing/merging a commit, which populates `doc_cache` automatically; or
-   - `[VERIFY]` For initial seed, you may need a manual first-sync (there's no standalone "rebuild cache" endpoint yet — BACKLOG candidate). Simplest path: set up the GitHub webhook (B7) first, then make a trivial commit to the content repo to trigger a full sync of the changed files.
+- **`doc_path`** is just a logical identifier in v1 (no GitHub path to match) — keep it consistent between the `doc_cache` row and the `manifest_entries` row so the manifest resolves to the cached doc.
+- **Per-topic docs (optional):** for a topic-specific doc, push another `doc_cache` row and add a `manifest_entries` row with `telegram_thread_id = <the topic's message_thread_id>`. *(v1 resolution uses entity-general + per-topic; per-**group** scoping via `group_id` is not yet built — see `PLANNING.md` §9.)*
+- **Re-seeding / editing content** later: just re-run the `doc_cache` upsert with new content (the `on conflict` updates it). This is the manual content-management path until a UI or a sync-source is added.
 
-## B7. Register the GitHub sync webhook
-
-On the tenant's **content repo** (GitHub → Settings → Webhooks → Add webhook):
-- **Payload URL:** `https://api.kenntnis.ai/api/webhooks/github/sync`  *(no slug — the handler resolves the entity by repo owner/name)*
-- **Content type:** `application/json`
-- **Secret:** the **global** `GITHUB_WEBHOOK_SECRET` from A7 (same value for every tenant — the handler verifies HMAC with this one secret, then resolves the entity from the repo).
-- **Events:** Just the `push` event.
-
-> Because the signing secret is global, all tenants' content repos use the *same* webhook secret; tenant resolution happens by repo identity, not by the secret. Keep that secret strong and protected.
-
-## B8. Register the Telegram webhook
+## B6. Register the Telegram webhook
 
 Point Telegram at this tenant's slug-specific endpoint, with the per-tenant webhook secret (the *plaintext* value from B2, the same one stored in Vault):
 
@@ -289,12 +298,13 @@ curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \
 > The URL ends in the entity **slug** (`/hys`). The `secret_token` is what Telegram sends in the `x-telegram-bot-api-secret-token` header; the handler compares it to the Vault-stored `telegram_webhook_secret`. They must match exactly (mind trailing newlines).
 > If re-registering, `deleteWebhook?drop_pending_updates=true` first to clear any queued updates.
 
-## B9. Test end-to-end
+## B7. Test end-to-end
 
 1. In a topic of the group, send `/help` → expect the static help reply in-thread.
-2. Send `/ask <a question answerable from the seeded context>` → expect the 👀 reaction, then a typing indicator, then an HTML-formatted answer in the correct topic.
+2. Send `/ask <a question answerable from the seeded content>` → expect the 👀 reaction, then a typing indicator, then an HTML-formatted answer in the correct topic. **(This is the milestone: the bot answering, grounded in your cached content. It also exercises the multi-query path where `prepare: false` earns its keep.)**
 3. `@mention` the bot with a question → same as `/ask`.
-4. Edit a context doc → PR → merge to `main` → confirm the GitHub sync updates `doc_cache` (the next `/ask` reflects the change).
+4. Send a plain (non-command) message → confirm a `message_log` row appears (validates privacy mode is off and message-logging works).
+5. **Update content:** re-run the B5 `doc_cache` upsert with edited content → the next `/ask` reflects the change (confirms the cache is the live source).
 
 Tenant is live. Repeat Part B for the next *entity*; use **Part C** to add another *group* to this entity.
 
@@ -302,9 +312,9 @@ Tenant is live. Repeat Part B for the next *entity*; use **Part C** to add anoth
 
 # Part C — Add a Group to an Existing Entity
 
-> For when an entity already exists (onboarded via Part B) and you want to add **another Telegram group** under it — e.g. "HYS Board" alongside "HYS Internal". Because Telegram has **no per-topic user permissions**, separating audiences requires separate *groups*; the platform's `entity (1)—(N) group` model handles this by attaching multiple groups to one entity. This flow is short: **the same bot, repo, webhook, and entity are reused** — you're only adding a Telegram group and one database row.
+> For when an entity already exists (onboarded via Part B) and you want to add **another Telegram group** under it — e.g. "HYS Board" alongside "HYS Internal". Because Telegram has **no per-topic user permissions**, separating audiences requires separate *groups*; the platform's `entity (1)—(N) group` model handles this by attaching multiple groups to one entity. This flow is short: **the same bot, content, webhook, and entity are reused** — you're only adding a Telegram group and one database row.
 
-> **Why no new bot/repo/webhook:** the entity already has its bot (whose single webhook points at the entity slug) and its content repo. The Telegram handler resolves the *group* from the incoming `chat_id` and the *entity* from the slug, so one bot in multiple groups routes correctly. (Decision: **one bot per entity, serving all its groups** — see `PLANNING.md` §9.)
+> **Why no new bot/content/webhook:** the entity already has its bot (whose single webhook points at the entity slug) and its content (in `doc_cache`). The Telegram handler resolves the *group* from the incoming `chat_id` and the *entity* from the slug, so one bot in multiple groups routes correctly. (Decision: **one bot per entity, serving all its groups** — see `PLANNING.md` §9.)
 
 ## C1. Create the new Telegram group
 
@@ -314,7 +324,7 @@ Tenant is live. Repeat Part B for the next *entity*; use **Part C** to add anoth
 
 ## C2. Insert the group row (the core of this flow)
 
-Get the new group's `telegram_chat_id` (e.g. from a `getUpdates` call after the bot is in the group), then insert **one row** referencing the **existing** entity:
+Get the new group's `telegram_chat_id` (see the methods in B5 — the get-ID utility bot is easiest; note `getUpdates` won't work here because this entity's webhook is already set, so use the utility-bot method), then insert **one row** referencing the **existing** entity:
 
 ```sql
 insert into groups (entity_id, telegram_chat_id, display_name)
@@ -338,34 +348,85 @@ The new group is live under the existing entity.
 
 ---
 
+# Managing & Rotating Secrets
+
+> Operational reference for the secret *lifecycle* after onboarding — finding a secret you didn't record, and rotating one (bot tokens may be regenerated; the webhook secret or any secret may need rotating if compromised). Applies to all entities. **v1 has two secrets per entity** (bot token, webhook secret); a GitHub PAT only exists if you later enable the optional GitHub sync-source.
+
+## Finding a secret's UUID (you don't need to have written it down)
+
+The secret UUIDs aren't floating loose — the **entity row stores them**, so the entity table is your index into Vault. To get an entity's secret UUIDs:
+
+```sql
+select slug, telegram_bot_token_id, telegram_webhook_secret_id, github_token_id
+from entities
+where slug = 'hys';
+```
+
+(`github_token_id` is null in v1.) Or list Vault secrets directly by the human-readable **name** you set in B3 (this is exactly why that name matters):
+
+```sql
+select id, name, created_at from vault.secrets order by created_at desc;
+```
+
+Between these two, you can always recover a UUID — via the entity that references it, or by its name in `vault.secrets`.
+
+## Rotating a secret (in place — keeps the same UUID)
+
+The clean rotation path updates the secret's **value in place**, keeping the same UUID. Because the entity row already points at that UUID, **nothing else has to change** — the entity keeps its reference, which now holds the new value, and the app picks it up on its next call (it reads the current value via `get_current_entity_secret`).
+
+```sql
+-- 1. Find the UUID (via the entity row or vault.secrets, above).
+-- 2. Update the secret's value in place:
+select vault.update_secret(
+  'THE_SECRET_UUID',   -- e.g. entities.telegram_bot_token_id
+  'THE_NEW_VALUE'      -- the new token / secret
+);
+```
+
+`[VERIFY]` Confirm the exact `vault.update_secret(...)` signature for your Supabase version (commonly `update_secret(id, new_secret [, new_name [, new_description]])`). The concept holds regardless: update in place, UUID unchanged, entity reference still valid.
+
+> **Telegram webhook secret rotation has an extra step:** if you rotate the `telegram_webhook_secret`, you must *also* re-run `setWebhook` (B6) with the new plaintext value, since Telegram stores its own copy and sends it in the header. (The bot token has no such external copy — only the Vault value matters.)
+
+> **Alternative — new secret + re-point the entity (new UUID).** If you prefer a fresh secret (new name/UUID): `vault.create_secret('NEW_VALUE','new_name')` → capture the new UUID → `update entities set telegram_bot_token_id = 'NEW_UUID' where slug = 'hys';` → (optionally delete the old secret). More steps; the in-place update above is preferred for routine rotation. Both the create and the `update entities` are privileged admin actions (run in the SQL editor as `postgres`).
+
+> **GitHub PAT (only if the optional GitHub sync-source is enabled):** a fine-grained PAT expires, and an expired token silently stops doc-sync (the bot keeps answering from cache but goes stale). Rotation is the same in-place pattern: generate a new PAT → `vault.update_secret(<entities.github_token_id>, '<new_pat>')`. Not applicable to the v1 direct-cache path.
+
+---
+
 # Appendix — Quick reference
 
 **Webhook URLs:**
 - Telegram (per-tenant): `https://api.kenntnis.ai/api/webhooks/telegram/{slug}`
-- GitHub sync (shared, resolves by repo): `https://api.kenntnis.ai/api/webhooks/github/sync`
+- GitHub sync (optional, not used in v1): `https://api.kenntnis.ai/api/webhooks/github/sync` — resolves by repo; only relevant if the GitHub sync-source is enabled later.
 
-**Environment variables (platform-wide):** `DATABASE_URL` (bot_service), `ANTHROPIC_API_KEY`, `GITHUB_WEBHOOK_SECRET`.
+**Environment variables (platform-wide):** `DATABASE_URL` (bot_service, **pooler** string), `ANTHROPIC_API_KEY`. `GITHUB_WEBHOOK_SECRET` is only needed if the optional GitHub sync-source is enabled (not used in v1).
 
-**Per-tenant secrets (in Vault):** telegram bot token, telegram webhook secret, github token.
+**Per-tenant secrets (in Vault), v1:** telegram bot token, telegram webhook secret. (A GitHub token is added only if the optional GitHub sync-source is enabled.)
 
-**The three `SECURITY DEFINER` functions** (the only sanctioned RLS-bypass surfaces): `resolve_entity_id_by_slug`, `resolve_entity_id_by_repo`, `get_current_entity_secret`. See `SECURITY-PROPOSAL.md`.
+**Content (v1):** lives directly in `doc_cache`, pushed via SQL (B5). No GitHub in the v1 path; the store is abstracted so sync-sources (GitHub/Drive/etc.) can populate the cache later — see `PLANNING.md`.
 
-**Prerequisite ordering (the parts that bite if done out of order):** Vault verified → `bot_service` role created → migration run (grants included) → app deployed (pooler `DATABASE_URL`) → domain live → webhooks registered.
+**The three `SECURITY DEFINER` functions** (the only sanctioned RLS-bypass surfaces): `resolve_entity_id_by_slug`, `resolve_entity_id_by_repo` (used only by the GitHub sync, dormant in v1), `get_current_entity_secret`. See `SECURITY-PROPOSAL.md`.
+
+**Prerequisite ordering (the parts that bite if done out of order):** Vault verified → `bot_service` role created → migration run (grants included) → app deployed (pooler `DATABASE_URL`) → domain live → Telegram webhook registered (per tenant).
 
 ---
 
 ## Open items this guide surfaced (for BACKLOG / Antigravity confirmation)
 
-- **`prepare: false` in `lib/supabase.ts`** (A7) — required for the Supavisor transaction pooler (port 6543); without it, queries fail with prepared-statement errors once connected. Confirm it's set in the client init.
-- **No cache-rebuild / seed endpoint** (B6) — initial doc-cache population relies on triggering the GitHub webhook. A standalone "rebuild entity cache from repo" admin function would make onboarding and recovery cleaner.
-- **`checkVaultSecretsHealth` is not exposed via any route** (A9) — wire it to a small admin/health endpoint for pre-launch verification.
-- **Entity-creation RLS path** (B5) — document/confirm that initial entity creation is a privileged admin action (SQL editor as `postgres`), since `bot_service` + `WITH CHECK` cannot bootstrap the first row of a new entity.
+- **`prepare: false` in `lib/supabase.ts`** (A7) — ✅ confirmed set; required for the Supavisor transaction pooler.
+- **`github_*` columns are NOT NULL but unused in v1** (B4) — the entity insert must supply nominal `github_owner/repo/branch/context_root` even though v1 doesn't use GitHub. Consider a future migration to make them nullable (or move them to a separate `sync_sources` config) when the content-store abstraction is formalized.
+- **No cache-rebuild / bulk-seed endpoint** (B5) — v1 content is pushed via manual SQL upserts. A small admin endpoint (or eventual UI) to manage `doc_cache` content would replace the manual SQL; this is the v1 content-management path for now.
+- **`checkVaultSecretsHealth` is not exposed via any route** (A9) — wire it to a small admin/health endpoint for pre-launch verification (also a natural home for a privacy-mode check via `getMe`).
 - **`package.json` name is still `temp-next`** — rename to the project.
-- **Vault insertion API** (B3) — confirm exact `vault.create_secret(secret, name)` signature for the current Supabase version (to be verified during the first Part B onboarding).
+- **`vault.update_secret(...)` signature** (Managing & Rotating Secrets) — confirm exact signature for the current Supabase version (to be verified on first rotation).
 
-### Resolved during first deploy (2026-06-19)
+### Resolved during first deploy / first onboarding (2026-06-19–20)
 - **Table-privilege grants** — now in the migration (BACKLOG B0); A5 produces a working role in one step. Verified: 32 grant rows.
 - **Migration application** — `npx supabase db push` used successfully (after `bot_service` role created first).
 - **Vault** — already provisioned (v0.3.1, pgsodium-free); verify-not-create (A3).
-- **`DATABASE_URL`** — must be the transaction-mode pooler string, not direct (A7); direct host fails `ENOTFOUND` from Vercel.
+- **`DATABASE_URL`** — must be the transaction-mode pooler string, not direct (A7); direct host fails `ENOTFOUND` from Vercel. `prepare: false` required and set.
 - **A6 sanity check** — `set role` fails in the SQL editor; use the `information_schema.role_table_grants` query.
+- **`vault.create_secret(secret, name)`** — works as written; returns the UUID (B3).
+- **Entity insert as `postgres`** — succeeds via SQL editor (bypasses RLS `WITH CHECK`); confirms entity creation is a privileged admin action (B4).
+- **`getUpdates` for chat_id** — works on any received message; a plain untagged message suffices (also confirms privacy off); fails once a webhook is set (B4).
+- **GitHub dropped from v1 path** — content is direct-to-`doc_cache`; GitHub-sync code retained as a future optional sync-source (see `PLANNING.md`).

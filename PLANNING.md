@@ -20,7 +20,7 @@ This is a ground-up rebuild of a working proof-of-concept. The POC was assembled
 - **One command + its equivalent:** `/ask <question>` and `@mention` of the bot (treated identically). Plus `/help` (static text).
 - **Per-topic context loading:** a general (entity-level) context document always loads, plus an optional per-topic document layered on top.
 - **Multi-tenant from day one:** one deployment serves multiple entities; all data is tenant-scoped and isolated.
-- **GitHub→cache sync:** when an entity's docs change (PR merged to main), the Postgres cache refreshes automatically.
+- **Content in the cache (database-direct):** content lives in `doc_cache`, populated directly in v1 (SQL upserts; UI later). *(Revised 2026-06-20 — see the banner atop §2. Originally this read "GitHub→cache sync"; GitHub is now an optional future sync-source, not the v1 path.)*
 - **Telegram-sourced identity & permissions:** group membership = access; Telegram admin/member distinction = role.
 - **Acknowledgment UX:** the responsiveness signals proven in the POC (eyes reaction on receipt, thread-scoped typing during the model call).
 - **HTML-formatted answers** with the sanitization the POC requires.
@@ -30,7 +30,7 @@ This is a ground-up rebuild of a working proof-of-concept. The POC was assembled
 - Write-commands: `/draft`, `/update`, `/recap`, `/status`, `/docs`.
 - `/setup` and topic auto-scaffolding (self-service onboarding).
 - Any management UI or web app.
-- Any public/REST API surface beyond the two webhooks (Telegram inbound, GitHub sync).
+- Any public/REST API surface beyond the Telegram inbound webhook. *(The GitHub sync route exists in code but is dormant in v1 — see the §2 banner.)*
 - Group-scoped context *resolution logic* (the schema supports it; v1 logic uses entity-general + per-topic only).
 - Message-history-based features beyond the recent-conversation context already used by `/ask`.
 - Multiple model providers (the provider is abstracted; v1 ships one implementation: Anthropic).
@@ -44,6 +44,20 @@ A **Next.js app on Vercel** (serverless) is the engine. It exposes two webhook e
 ## 2. Architecture & Principles
 
 These principles are load-bearing. When the spec is silent on a detail, resolve it in the direction these principles point.
+
+> ### ⚠️ v1 Architecture Revision (2026-06-20): content store is database-direct; GitHub is an optional sync-source, not the canonical store
+>
+> **This revision was made while stepping through the first real deployment** (the kind of thing planning misses and contact reveals). It changes how content enters the system. Several subsections below (§1.1, §1.4, §2.2, §2.3, §6, §8) were written GitHub-canonical and are **superseded on this point** by what follows; they're retained as the original rationale (and remain accurate for the *eventual* GitHub adapter), but the v1 reality is:
+>
+> - **The content store is abstracted; the database (`doc_cache`) is the store the bot reads.** The bot answering path was always source-agnostic (it reads `doc_cache`, never GitHub at answer time) — that seam is what makes this clean.
+> - **v1 populates `doc_cache` directly** (SQL upserts now; a management UI later). **No GitHub in the v1 path** — no per-tenant PAT, no sync webhook, none of that onboarding/operational complexity.
+> - **`doc_cache` keeps its name and meaning** — it *is* a cache (derived, rebuildable). In v1 the "source" feeding it is just direct writes; later, **pluggable sync-sources** (GitHub, Google Workspace/Drive, others) can populate the same cache. Content source becomes a swappable *adapter* behind the read interface, not a foundation.
+> - **Why:** (1) removes real complexity (PAT expiry/rotation/silent-stale-cache) hit during onboarding; (2) **the target users are non-technical** — requiring a GitHub account + fine-grained PAT is a barrier, not a feature; the product wants a UI that writes to the DB directly. GitHub-canonical is the right model for a *developer* audience (a future enterprise/dev tier), not the default. (3) The manifest is **natively a table** (`manifest_entries`) — a topic→doc mapping is relational data, not a document; dropping GitHub removes the awkwardness of encoding it as a synced file. Content = cached-from-sources; mapping = native config.
+> - **Versioning** (which GitHub provided) is **deferred**, and when wanted can be done in-database (a history/archive table + trigger that snapshots a `doc_cache` row on update) — less robust than Git (no branches/diffs/PRs) but sufficient for "see prior versions / roll back."
+> - **`/draft` reframed:** produces a markdown file **uploaded to Telegram** (the user downloads/pushes it wherever they like) — no write-back-to-Git, decoupling *output* from *the store*. Cleaner than the PR-creation flow for v1.
+> - **The GitHub-sync code is retained** (the §6 route, `resolve_entity_id_by_repo`, the `github_*` entity columns) as a working **future adapter** — not deleted, just not required or used in v1. (The `github_*` columns are NOT NULL in the current schema, so v1 entity inserts supply nominal values; a future migration may make them nullable / move them to a `sync_sources` config.)
+>
+> **The discipline that keeps this safe:** the bot's read path must stay **source-agnostic** — "get docs for this entity/topic from the store," never "fetch from GitHub." It already is. As long as that holds, content-source is a swappable adapter and this is a deferral, not a one-way door.
 
 ### 2.1 Tenant isolation is a correctness-and-confidentiality requirement, not an optimization
 
@@ -410,6 +424,7 @@ Each item is intentionally out of v1. Where the schema already supports it, that
 - **Idempotency:** A `processed_updates` table logs `update_id` to block duplicate deliveries.
 - **Sync granularity:** Use the GitHub Compare API (`/repos/{owner}/{repo}/compare/{before}...{after}`) to determine added/modified/renamed/removed files on push events, avoiding delta payload parsing errors.
 - **RLS policy model:** Force RLS on all tenant-scoped tables and apply policies tied to a session variable (e.g. `app.current_entity_id`) to ensure database-level boundary safety even for the `service_role`.
+- **Content store is database-direct in v1; GitHub demoted to an optional sync-source (2026-06-20 revision — see the banner atop §2).** The bot reads from `doc_cache` (always did, source-agnostically); v1 populates it directly (SQL now, UI later) with **no GitHub in the path** (no PAT, no sync webhook). `doc_cache` stays a *cache* with pluggable sync-sources (GitHub/Drive/etc.) addable later behind the source-agnostic read interface. Drivers: removes PAT/expiry complexity; target users are non-technical (GitHub/PAT is a barrier); the manifest is natively a table, not a synced document. GitHub-sync code is **retained as a future adapter**, not deleted. Versioning deferred (doable via an in-DB history table + trigger). `/draft` reframed to upload a markdown file to Telegram (no write-back).
 
 **Open questions / calls for the builder**:
 - **CLA:** not needed now (sole author). **Trigger:** if outside contributions start arriving (and the business path is real), add a CLA (e.g. CLA Assistant) or an inbound=outbound + relicensing-grant clause in `CONTRIBUTING.md` *before merging* external PRs — this preserves the ability to relicense (AGPL→looser, or dual-license) later. No action until the first external PR appears.
