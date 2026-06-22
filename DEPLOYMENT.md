@@ -75,6 +75,13 @@ Apply `supabase/migrations/20260618000000_init_schema.sql`. This creates all tab
 
 > Reminder: this step **will fail** if A3 (Vault) or A4 (`bot_service` role) haven't been done — both are prerequisites.
 
+> **⚠️ RLS policies must be PERMISSIVE, not RESTRICTIVE.** A second migration (`20260621000000_fix_rls_permissive.sql`) corrects an early bug where all eight policies were created `as restrictive`. **Restrictive policies can only *filter* what permissive policies grant** — with no permissive policy, they grant nothing, so `bot_service` gets **zero rows on every table**. This is invisible during setup (the SQL editor connects as `postgres` and bypasses RLS) and only surfaces at runtime as a **`{"error":"Tenant config mismatch"}` 404** on the first real request as `bot_service`. `db push` applies both migrations. **Verify after pushing:**
+> ```sql
+> select tablename, policyname, permissive from pg_policies
+> where schemaname = 'public' order by tablename;
+> ```
+> All eight must show **`PERMISSIVE`**. (A permissive policy `using (... = app.current_entity_id)` is still fully tenant-isolating — it grants only the session entity's rows and hides all others. Permissive vs restrictive is fixed at creation, so the fix is drop + recreate.)
+
 ## A6. Table privileges for `bot_service` (now handled by the migration)
 
 ✅ **No action needed here** — table privileges are granted **inside the migration** (section 5, after the `grant execute` lines): `usage` on schema, `select/insert/update/delete` on all tables, sequence usage, and `alter default privileges` for future tables. So A5 already gave `bot_service` the base privileges it needs.
@@ -101,7 +108,8 @@ Apply `supabase/migrations/20260618000000_init_schema.sql`. This creates all tab
    |---|---|---|
    | `DATABASE_URL` | the **transaction-mode pooler** string (see below) | **Must be the `bot_service` role**, not `postgres`. Mark **Sensitive** in Vercel. |
    | `ANTHROPIC_API_KEY` | your Anthropic key | Mark Sensitive. |
-   | `GITHUB_WEBHOOK_SECRET` | a strong shared secret | **Global** signing secret for the GitHub sync webhook (shared across all tenants — see B7). Generate via a password manager (a passphrase is fine — GitHub accepts any string); **save it** — you re-enter this same value into every tenant's GitHub webhook (B7). Mark Sensitive. |
+   | `ANTHROPIC_MODEL` | a current model id, e.g. `claude-sonnet-4-6` | Platform-wide default model. **Not** sensitive. Code reads `process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6'`. Using an env var (not a hardcoded id) means a deprecated model can be swapped without a code change — see the B7 note on the model-404 failure. (Per-entity model override is future — `PLANNING.md` §9.) |
+   | `GITHUB_WEBHOOK_SECRET` | a strong shared secret | **Only needed if the optional GitHub sync-source is enabled** (not used in v1). If used: global HMAC secret, generate via password manager, save it. Mark Sensitive. |
 
    > **⚠️ `DATABASE_URL` MUST be the transaction-mode POOLER string, not the direct connection.** This bit us on the first deploy: the **direct** connection host (`db.PROJECT_REF.supabase.co:5432`) is **unreachable from Vercel** — the function crashes with `getaddrinfo ENOTFOUND db.PROJECT_REF.supabase.co` (the direct host is IPv6-oriented and serverless can't resolve/reach it). Use the **Supavisor transaction pooler** instead. Get it from **Supabase → Project Settings → Database → Connection string → "Connection pooling" / Transaction mode**. It differs from the direct string in three ways:
    > - **Host:** `aws-<n>-<region>.pooler.supabase.com` (e.g. `aws-1-us-west-2.pooler.supabase.com`), not `db.<ref>.supabase.co`
@@ -196,14 +204,26 @@ v1 stores **two** secrets for this tenant in Vault (B3):
 
 ## B3. Store the secrets in Supabase Vault
 
-Insert each secret into Vault and capture its returned `id` (UUID). Run in the SQL editor:
+Insert each secret into Vault and capture its returned `id` (UUID). **`vault.create_secret(secret_value, label)` — first arg is the ACTUAL secret value, second is a human-readable label.** Run in the SQL editor:
 
 ```sql
+-- vault.create_secret( <THE ACTUAL SECRET VALUE> , <a label/name> )
+--   arg 1 = the real secret (paste the actual token/secret here)
+--   arg 2 = a name you choose, just for finding it later
 -- Returns the UUID of the stored secret; capture each one.
--- The second argument is the secret's NAME — use something meaningful for THIS tenant.
-select vault.create_secret('THE_BOT_TOKEN',      'your_new_telegram_bot_token');
-select vault.create_secret('THE_WEBHOOK_SECRET', 'your_new_telegram_webhook_secret');
+select vault.create_secret('123456:ABC-RealBotTokenFromBotFather', 'telegram_bot_token_hys');
+select vault.create_secret('a1b2c3...the-real-64char-hex-secret', 'telegram_webhook_secret_hys');
 ```
+
+> ⚠️ **DO NOT SWAP THE ARGUMENTS.** This is the single easiest mistake to make here, and it fails *silently* until the first `/ask`. If you put the **label** first and the **real secret** second, the bot's webhook auth will reject every message (the handler compares the stored *value* — which would be your label — against what Telegram sends), and worse, **your real secret ends up sitting in plaintext in the `name` column** (the `name` is NOT encrypted; only the value is). First arg = real secret, second arg = label. Always.
+
+> ✅ **Verify immediately** that value and name landed in the right columns (catches the swap before it bites):
+> ```sql
+> select name, decrypted_secret, length(decrypted_secret) as len
+> from vault.decrypted_secrets
+> order by created_at desc limit 2;
+> ```
+> `decrypted_secret` should be the **real secret** (e.g. the webhook secret is a 64-char hex → `len` 64); `name` should be your **label** (`telegram_..._hys`). If they're reversed (`decrypted_secret` shows your label and `name` shows the real secret), fix with `vault.update_secret(id, '<real value>', '<label>')` — see *Managing & Rotating Secrets*.
 
 > ✅ **Verified (first onboarding):** `vault.create_secret(secret, name)` works as written and returns the secret's UUID. Record the two UUIDs for B4.
 
@@ -305,6 +325,8 @@ curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \
 3. `@mention` the bot with a question → same as `/ask`.
 4. Send a plain (non-command) message → confirm a `message_log` row appears (validates privacy mode is off and message-logging works).
 5. **Update content:** re-run the B5 `doc_cache` upsert with edited content → the next `/ask` reflects the change (confirms the cache is the live source).
+
+> **If `/ask` replies "Sorry, something went wrong":** that's the graceful error path — the pipeline worked but the async answer step threw. Check the Vercel logs. A common first-run cause is a **deprecated model id**: `Anthropic API call failed: 404 ... "model: <id>"` means `ANTHROPIC_MODEL` (or the code default) points at a retired model. Fix by setting `ANTHROPIC_MODEL` to a current id (e.g. `claude-sonnet-4-6`) and redeploying — no other change needed. (Model ids get deprecated over time; this is why it's an env var.)
 
 Tenant is live. Repeat Part B for the next *entity*; use **Part C** to add another *group* to this entity.
 
@@ -420,7 +442,7 @@ select vault.update_secret(
 - **`package.json` name is still `temp-next`** — rename to the project.
 - **`vault.update_secret(...)` signature** (Managing & Rotating Secrets) — confirm exact signature for the current Supabase version (to be verified on first rotation).
 
-### Resolved during first deploy / first onboarding (2026-06-19–20)
+### Resolved during first deploy / first onboarding (2026-06-19–22)
 - **Table-privilege grants** — now in the migration (BACKLOG B0); A5 produces a working role in one step. Verified: 32 grant rows.
 - **Migration application** — `npx supabase db push` used successfully (after `bot_service` role created first).
 - **Vault** — already provisioned (v0.3.1, pgsodium-free); verify-not-create (A3).
@@ -430,3 +452,6 @@ select vault.update_secret(
 - **Entity insert as `postgres`** — succeeds via SQL editor (bypasses RLS `WITH CHECK`); confirms entity creation is a privileged admin action (B4).
 - **`getUpdates` for chat_id** — works on any received message; a plain untagged message suffices (also confirms privacy off); fails once a webhook is set (B4).
 - **GitHub dropped from v1 path** — content is direct-to-`doc_cache`; GitHub-sync code retained as a future optional sync-source (see `PLANNING.md`).
+- **RLS policies were RESTRICTIVE → fixed to PERMISSIVE** (migration `20260621000000_fix_rls_permissive.sql`). Restrictive-only = deny-all for `bot_service`; surfaced as "Tenant config mismatch" 404 on the first real request. Invisible in the SQL editor (postgres bypasses RLS). See A5 note.
+- **Vault secret value/name SWAP** — on first onboarding all three secrets were inserted with `create_secret` args reversed (real value in `name`, placeholder in value). Caused 401 webhook-auth failures + plaintext secrets in `name`. B3 rewritten with explicit arg-order warning + immediate verify query.
+- **Deprecated model id** — hardcoded `claude-3-5-sonnet-20241022` returned 404 "model not found" (surfaced as the bot's "something went wrong" reply). Moved to `ANTHROPIC_MODEL` env var defaulting to `claude-sonnet-4-6` (B7 note, A7 env table).

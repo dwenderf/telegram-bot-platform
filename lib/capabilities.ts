@@ -205,7 +205,7 @@ export async function answerQuestion(input: {
     input.threadId
   );
 
-  const model = 'claude-3-5-sonnet-20241022';
+  const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
 
   const systemPrompt = `You are a helpful AI assistant for the team. Answer the user's question accurately based ONLY on the provided context documents. If the answer cannot be determined from the context, politely state that you do not know.
 
