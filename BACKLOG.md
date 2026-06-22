@@ -19,34 +19,39 @@ These are items the deployment runbook flagged as needing confirmation against t
 - **Now:** document this clearly (done in `DEPLOYMENT.md` B5) so no one tries to create entities via the `bot_service` connection and is confused when RLS blocks it.
 - **Later (future feature):** build a proper admin path for tenant creation — an internal admin function / dashboard / sign-up flow that performs the privileged insert programmatically. This is the natural home for it once the management UI exists (it does, as a privileged operation, what the SQL editor does by hand today). Tracks with the web-app/management-UI direction in `PLANNING.md` §9.
 
-### B4 — No cache-rebuild / seed endpoint
-The bot reads docs from `doc_cache`, which is populated only by the GitHub sync webhook. Initial seeding therefore requires triggering the webhook (e.g. a trivial commit to the content repo). A standalone "rebuild this entity's cache from its repo" admin function would make onboarding and recovery cleaner (and reinforces the "cache is rebuildable from Git" principle in `PLANNING.md` §2.2). *Why it matters:* smoother onboarding and a recovery tool if the cache is ever cleared.
+### B4 — No cache-rebuild / bulk-seed endpoint
+v1 content is pushed directly into `doc_cache` via SQL upserts (no GitHub in v1 — see `PLANNING.md` §2 revision). A small admin endpoint (or the eventual management UI) to manage/seed `doc_cache` content would replace the manual SQL and make onboarding/recovery cleaner. *Why it matters:* smoother onboarding; a recovery tool if the cache is ever cleared; the write path the web app needs.
 
 ### B5 — Expose `checkVaultSecretsHealth` via a route
 `lib/capabilities.ts` has `checkVaultSecretsHealth(entityId)` but no route exposes it. Wire it to a small admin/health endpoint so an entity's Vault secret references can be verified before going live (catches a missing/deleted Vault secret clearly, rather than as a confusing first-auth failure). *Why it matters:* pre-launch verification per tenant.
 
-### B6 — Confirm version-specific setup commands
-Two steps in `DEPLOYMENT.md` depend on Supabase-version specifics worth confirming on the first real deploy:
-- **Vault insertion API** (B3 in DEPLOYMENT): the exact `vault.create_secret(secret, name)` signature.
-- **Migration application** (A5 in DEPLOYMENT): `npx supabase db push` vs. SQL-editor; pick one to avoid CLI history desync.
+### B6 — Confirm remaining version-specific commands
+- **Migration application** (A5 in DEPLOYMENT): standardize on `npx supabase db push` (used successfully) vs. SQL-editor; pick one to avoid CLI history desync. *(`vault.create_secret(secret, name)` signature — confirmed working during first onboarding; `vault.update_secret(...)` still to confirm on first rotation.)*
 
 ### B7 — Rename `package.json` from `temp-next`
 `package.json` still has the scaffold default `"name": "temp-next"`. Rename to the project (e.g. `telegram-bot-platform` or `kenntnis`). Trivial.
 
 ---
 
+## Open — near-term features
+
+### /context command (read-only context viewer)
+A `/context` slash command that shows what the bot is answering from in the current entity + topic. Two parts:
+- **Inline summary:** a short manifest/index view — which docs load here (e.g. "answering from: [general] overview.md, [topic] none"). Small, always useful; surfaces content gaps.
+- **Full content as attached markdown file(s):** the actual loaded context (global/group doc + any topic doc) uploaded as Telegram file(s), sidestepping the ~4096-char message limit (same "Telegram holds a file of any size" insight as the `/draft` reframe).
+
+*Why it matters:* makes the bot's knowledge transparent (trust/debugging, spotting content gaps), and is the read-only Telegram precursor to web-app content viewing/editing. Small build, exercises the "adding a command is easy" claim, good first thing to build after the multi-group test. Read-command (no model call) — simpler than `/ask`.
+
+### Register bot commands (`setMyCommands`)
+The bot's command menu/autocomplete is empty until commands are registered (via BotFather `/setcommands` or the Bot API `setMyCommands`). Typing `/ask` works regardless (the handler parses text), but registering populates the `/` menu. Do `ask` + `help` (+ `context` once built). The Bot API path is preferable long-term (the future onboarding UI automates it). *Surfaced during first onboarding — B1 in DEPLOYMENT didn't include it.*
+
+---
+
 ## Open — non-security polish
 
-### B1 — Move the model id to per-tenant config (currently hardcoded)
-`lib/capabilities.ts` (`answerQuestion`) hardcodes the model:
-```ts
-const model = 'claude-3-5-sonnet-20241022';
-```
-`PLANNING.md` §4.2 specifies the model id should live in **per-entity config** (so it's tunable per-tenant and updatable without a code change). Two parts:
-- Move the model id into entity config (e.g. an `entities.model` column or a config table) and read it per request.
-- The hardcoded value is also an **older Sonnet**; pick a current model when wiring this up.
-
-*Why it matters:* product flexibility (different tenants may want different models/tiers) and avoids a code deploy to change models. Not urgent for a single-tenant POC, but it's a §4.2 requirement and cheap to do.
+### B1 — Model id: env-var default done; per-entity override remaining
+**Partially resolved.** The hardcoded `claude-3-5-sonnet-20241022` (which was deprecated and returned a 404) is now read from `process.env.ANTHROPIC_MODEL` with a `'claude-sonnet-4-6'` fallback. So the platform-wide default is now config, not code.
+**Remaining:** per-entity model override — resolve as `entity.model || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6'`. Ties into the broader **per-tenant provider config** `{ provider, model, optional api_key_ref }` flagged for `PLANNING.md` (per-entity Anthropic keys / BYOK-vs-metered billing). *Why it matters:* different tenants may want different models/tiers; also the seam for per-tenant API keys.
 
 ### B2 — Verify null-thread (General topic) doc resolution in `buildContext`
 `lib/capabilities.ts` (`buildContext`) matches topic docs with:
