@@ -299,3 +299,62 @@ curl "https://api.telegram.org/bot<BOT_TOKEN>/setMyCommands" \
 - **No group-layer scoping** — matches `buildContext` (v1). The summary/file label the Group section as "not enabled" so it's honest, and the seam is obvious for when group-scoped resolution lands.
 - **No recent-conversation display** — `/context` is about *documentation* context (what's stable/configured), not the live message history. (Could be added later, but the docs are the useful, stable thing to surface.)
 - **No editing** — read-only. Editing is the web-app/management-plane job (MANAGEMENT-PROPOSAL.md).
+
+---
+
+# ADDENDUM 1 — Inline summary refinement (status-based, not path-based)
+
+> **Status:** ready to implement. Small follow-up to the shipped `/context`. Handler-only change (the `summaryLines` assembly in the `/context` block of `route.ts`). No capability, query, or `sendDocument` changes.
+>
+> **Motivation:** the first version listed each layer's `doc_path` values inline (e.g. `Entity: context/overview.md`). In practice that's low-value: `doc_path` is a **leftover naming convention from the GitHub era** — it isn't a real path and isn't meaningful to end users — and with multiple docs the names don't display cleanly anyway. The inline summary should be an **at-a-glance status read** (is each layer set, and how many docs), with the *content* (and the doc identifiers, as section headers) living in the attached `context.md` file. This also removes the redundancy where the summary just echoed the filenames that the file then contained.
+
+## What changes
+
+Replace the per-layer **filename listing** in the inline summary with a per-layer **status + document count**. Keep everything else (the file attachment, the `totalDocs > 0` guard, the document assembly) exactly as-is.
+
+### New summary format
+
+Per layer, show one of:
+- **Entity / Topic:** `✓ N document(s)` when set, or `— none set` when empty.
+- **Group:** always `— not enabled in this version` (the group layer isn't resolved in v1).
+
+Then a **conditional closing line**, depending on whether a file follows (`totalDocs > 0`):
+- if `totalDocs > 0`: `📎 Full text attached below ↓`
+- if `totalDocs === 0`: `_No context is configured for this topic yet._` (and, as before, **no file is sent**)
+
+### Example — entity doc present, no topic doc (the common case)
+```
+📚 Context for this topic
+
+Entity: ✓ 1 document
+Group: — not enabled in this version
+Topic: — none set
+
+📎 Full text attached below ↓
+```
+(followed by the `context.md` attachment)
+
+### Example — nothing configured
+```
+📚 Context for this topic
+
+Entity: — none set
+Group: — not enabled in this version
+Topic: — none set
+
+No context is configured for this topic yet.
+```
+(no attachment)
+
+## Implementation notes
+- Use the existing `entityDocs.length` and `topicDocs.length` from `getContextManifest` — no new data needed.
+- Pluralize the count: `${n} document${n === 1 ? '' : 's'}`.
+- Keep the Telegram-HTML styling consistent with the current summary (`<b>` labels, `<i>` for the muted "none"/"not enabled" states). The closing line's italic "no context configured" variant should use `<i>...</i>`.
+- **Do NOT** show `doc_path` anywhere in the inline summary. (It still appears in the attached file as the `### {doc_path}` section headers — that's the right place for the identifier, and it's fine there even though it's a legacy name.)
+- The `totalDocs` variable already exists in the block; the closing-line branch keys off it, matching the existing file-send guard so the two stay consistent (line promises a file iff a file is sent).
+
+## Test plan (addendum)
+1. **Entity doc only** → summary shows `Entity: ✓ 1 document`, `Group: — not enabled…`, `Topic: — none set`, then `📎 Full text attached below ↓`, then the file. **No `doc_path` appears in the message.**
+2. **Entity + topic docs** → both show `✓ N document(s)` with correct counts; closing line + file present.
+3. **Nothing configured** → all `— none set` / `not enabled`, closing line is the italic "No context is configured…", **no file sent**.
+4. **Plurals** → a layer with 2+ docs reads `documents` (not `document`).

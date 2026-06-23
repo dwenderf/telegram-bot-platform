@@ -172,16 +172,30 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
             const totalDocs = entityDocs.length + topicDocs.length;
 
-            // (1) Inline summary — always small, always fits.
+            // (1) Inline summary — status-based metrics (ADDENDUM 1)
+            const entityText = entityDocs.length > 0
+              ? `✓ ${entityDocs.length} document${entityDocs.length === 1 ? '' : 's'}`
+              : `<i>— none set</i>`;
+            
+            const groupText = `<i>— not enabled in this version</i>`;
+            
+            const topicText = topicDocs.length > 0
+              ? `✓ ${topicDocs.length} document${topicDocs.length === 1 ? '' : 's'}`
+              : `<i>— none set</i>`;
+
             const summaryLines: string[] = [];
             summaryLines.push(`<b>📚 Context for this topic</b>`);
             summaryLines.push('');
-            summaryLines.push(`<b>Entity:</b> ${entityDocs.length > 0 ? entityDocs.map(d => `<code>${escapeHtml(d.doc_path)}</code>`).join(', ') : '<i>none</i>'}`);
-            // Group layer not resolved in v1 (PLANNING §9) — show as not-yet-scoped.
-            summaryLines.push(`<b>Group:</b> <i>none (group-scoped context not enabled)</i>`);
-            summaryLines.push(`<b>Topic:</b> ${topicDocs.length > 0 ? topicDocs.map(d => `<code>${escapeHtml(d.doc_path)}</code>`).join(', ') : '<i>none</i>'}`);
+            summaryLines.push(`<b>Entity:</b> ${entityText}`);
+            summaryLines.push(`<b>Group:</b> ${groupText}`);
+            summaryLines.push(`<b>Topic:</b> ${topicText}`);
             summaryLines.push('');
-            summaryLines.push(`Answering from <b>${totalDocs}</b> document${totalDocs === 1 ? '' : 's'}.`);
+            
+            if (totalDocs > 0) {
+              summaryLines.push(`📎 Full text attached below ↓`);
+            } else {
+              summaryLines.push(`<i>No context is configured for this topic yet.</i>`);
+            }
 
             await sendMessage(
               entity.telegram_bot_token,
@@ -285,11 +299,6 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     console.error('Telegram webhook handler crash:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
-}
-
-// Minimal HTML escape for inline summary (doc_paths are simple, but be safe).
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 // Assemble the full-context markdown document (Entity / Group / Topic sections).
