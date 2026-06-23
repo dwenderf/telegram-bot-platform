@@ -185,12 +185,21 @@ Platform setup is complete. Everything below is per-tenant.
 >
 > **Adding a *second* group to an entity that already exists** (e.g. "HYS Board" alongside "HYS Internal") is **not** this flow — it's the much shorter **Part C**, which reuses the entity's existing bot, content, and webhook.
 
-## B1. Create the Telegram bot (BotFather)
+## B1. Create the Telegram group + bot
+
+### B1a. Create the group — with **Topics enabled** (required)
+
+1. In Telegram, create a new group, then **convert/upgrade it to a supergroup** if it isn't one already (adding members or enabling Topics generally triggers this automatically).
+2. **Enable Topics (forum mode) — this is a hard requirement, not optional.** Group **Settings → Topics → toggle on** (the exact path varies by client; on mobile it's under *Edit → Topics*). The entire context-routing model depends on Topics: the bot routes context and replies by `message_thread_id`, logs messages per topic, and supports per-topic context docs. **Without Topics enabled, topic-scoped features don't work** and there are no thread ids to map manifest entries to. Enable it before doing anything else with the group.
+
+> Why it's load-bearing: every message in a forum group carries a `message_thread_id` (except the *General* topic, which is null). The platform keys context resolution, message logging, and replies to that thread id (see `docs/PLANNING.md` §2.7 / §3.3). A non-forum group has no thread ids, so the per-topic model collapses. If you ever enable Topics on a group that already had the bot in it, that's fine — but enable it before relying on topic features.
+
+### B1b. Create the bot (BotFather)
 
 1. In Telegram, message **@BotFather** → `/newbot`. Set a name (the human-facing **display name**, free-form) and a **username** (must end in `bot`/`Bot` — case-insensitive; Latin letters/digits/underscores; 5–32 chars; globally unique). E.g. display name "HYS Assistant", username `kenntnis_hys_bot`.
 2. Save the **bot token** BotFather gives you.
 3. **Disable privacy mode — required:** BotFather → `/setprivacy` → select the bot → **Disable**. With privacy ON (the default), the bot only receives commands/mentions/replies, **not ordinary group messages** — so the recent-conversation feature silently degrades (the bot answers but can't reflect the live discussion). **Ordering gotcha:** privacy mode only applies to groups the bot joins *after* the setting is changed. So disable privacy **before** adding the bot to the group; if the bot is already in the group, **remove and re-add it**.
-4. Add the bot to the target Telegram **supergroup** (Topics/forum enabled), as a regular member (no admin needed). **Autocomplete gotcha:** a freshly-created bot often isn't cached yet, so it may not appear when you type `@` — **type the full username** explicitly.
+4. Add the bot to the **Topics-enabled supergroup from B1a**, as a regular member (no admin needed). **Autocomplete gotcha:** a freshly-created bot often isn't cached yet, so it may not appear when you type `@` — **type the full username** explicitly.
 5. Record the bot's exact **username** (bare, no `@`) — it's stored in the entity row and used for mention detection (matching is case-insensitive).
 6. **Confirm privacy is off:** send a plain (non-command) message in a topic; after B4/B5 it should produce a `message_log` row. (Quick early check via B3's chat-id step: if a *plain, untagged* message shows up in `getUpdates`, privacy is correctly off — if you must tag the bot to get an update, privacy is still on.)
 
@@ -318,13 +327,32 @@ curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \
 > The URL ends in the entity **slug** (`/hys`). The `secret_token` is what Telegram sends in the `x-telegram-bot-api-secret-token` header; the handler compares it to the Vault-stored `telegram_webhook_secret`. They must match exactly (mind trailing newlines).
 > If re-registering, `deleteWebhook?drop_pending_updates=true` first to clear any queued updates.
 
-## B7. Test end-to-end
+## B7. Register the bot's command menu (`setMyCommands`)
 
-1. In a topic of the group, send `/help` → expect the static help reply in-thread.
+Register the slash commands so they appear in Telegram's `/` autocomplete menu and the "Menu" button. (Functionally, typing `/ask` works even without this — the handler parses the text — but registering gives users discoverability.)
+
+```bash
+curl "https://api.telegram.org/bot<BOT_TOKEN>/setMyCommands" \
+  -H "Content-Type: application/json" \
+  -d '{"commands":[
+    {"command":"ask","description":"Ask a question grounded in the team docs"},
+    {"command":"context","description":"See what docs the bot answers from here"},
+    {"command":"help","description":"Show what the bot can do"}
+  ]}'
+```
+
+> Expect `{"ok":true,"result":true}`. The menu is **per-bot**, so this is a one-time step per entity (each entity has its own bot). Re-run it whenever the command set changes (e.g. when a new command ships). Keep this list in sync with the commands the handler actually implements (currently `/ask`, `/context`, `/help`; `@mention` is not a slash command so it isn't listed).
+>
+> *(Future: the onboarding UI will call `setMyCommands` automatically right after storing the bot token — it's one of the "everything after the token is automatable" steps; see `PLANNING.md` §9.)*
+
+## B8. Test end-to-end
+
+1. In a topic of the group, send `/help` → expect the static help reply in-thread (it lists `/ask`, `/context`, `@mention`, `/help`).
 2. Send `/ask <a question answerable from the seeded content>` → expect the 👀 reaction, then a typing indicator, then an HTML-formatted answer in the correct topic. **(This is the milestone: the bot answering, grounded in your cached content. It also exercises the multi-query path where `prepare: false` earns its keep.)**
 3. `@mention` the bot with a question → same as `/ask`.
-4. Send a plain (non-command) message → confirm a `message_log` row appears (validates privacy mode is off and message-logging works).
-5. **Update content:** re-run the B5 `doc_cache` upsert with edited content → the next `/ask` reflects the change (confirms the cache is the live source).
+4. Send `/context` → expect an inline summary of which docs load here, followed by a `context.md` file attachment with the full content. (In a topic with no docs, the summary shows "none" and no file is sent.)
+5. Send a plain (non-command) message → confirm a `message_log` row appears (validates privacy mode is off and message-logging works).
+6. **Update content:** re-run the B5 `doc_cache` upsert with edited content → the next `/ask` reflects the change (confirms the cache is the live source).
 
 > **If `/ask` replies "Sorry, something went wrong":** that's the graceful error path — the pipeline worked but the async answer step threw. Check the Vercel logs. A common first-run cause is a **deprecated model id**: `Anthropic API call failed: 404 ... "model: <id>"` means `ANTHROPIC_MODEL` (or the code default) points at a retired model. Fix by setting `ANTHROPIC_MODEL` to a current id (e.g. `claude-sonnet-4-6`) and redeploying — no other change needed. (Model ids get deprecated over time; this is why it's an env var.)
 
@@ -340,7 +368,7 @@ Tenant is live. Repeat Part B for the next *entity*; use **Part C** to add anoth
 
 ## C1. Create the new Telegram group
 
-1. Create the new supergroup with **Topics/forum enabled**.
+1. Create the new supergroup with **Topics (forum mode) enabled** — **required**, same as B1a. The platform routes context, logs messages, and supports per-topic docs by `message_thread_id`, which only exists in forum groups; a non-forum group breaks the per-topic model. (See B1a for the why and the enable path.)
 2. **Add the entity's existing bot** to it (the same bot from Part B — already created, privacy already disabled). When adding, **type the bot's full username** — a bot may not appear in `@`-autocomplete if Telegram hasn't cached it yet.
 3. **Send a message in the group.** Since the bot is already webhooked but this group isn't in the DB yet, the handler can't route it — and it **logs the chat id for you** (see C2). (Privacy mode, a per-bot BotFather setting, already applies in this new group; you'll confirm it logs in C4.)
 
