@@ -342,16 +342,24 @@ Tenant is live. Repeat Part B for the next *entity*; use **Part C** to add anoth
 
 1. Create the new supergroup with **Topics/forum enabled**.
 2. **Add the entity's existing bot** to it (the same bot from Part B — already created, privacy already disabled). When adding, **type the bot's full username** — a bot may not appear in `@`-autocomplete if Telegram hasn't cached it yet.
-   - `[VERIFY]` Privacy mode is a per-bot BotFather setting, so it *should* already apply in the new group. Confirm by sending a plain (non-command) message in a topic and checking a `message_log` row appears (after C2).
+3. **Send a message in the group.** Since the bot is already webhooked but this group isn't in the DB yet, the handler can't route it — and it **logs the chat id for you** (see C2). (Privacy mode, a per-bot BotFather setting, already applies in this new group; you'll confirm it logs in C4.)
 
 ## C2. Insert the group row (the core of this flow)
 
-Get the new group's `telegram_chat_id` (see the methods in B5 — the get-ID utility bot is easiest; note `getUpdates` won't work here because this entity's webhook is already set, so use the utility-bot method), then insert **one row** referencing the **existing** entity:
+Get the new group's `telegram_chat_id`, then insert **one row** referencing the **existing** entity.
+
+> **Getting the chat id — easiest method (the bot tells you).** After C1 step 3 (a message sent in the new group), the bot's handler logs the unrouteable message in the **Vercel logs** as:
+> ```
+> Message received from untracked chat ID: -5577480409
+> ```
+> That number is the `telegram_chat_id` — no utility bot or `getUpdates` needed. (`getUpdates` won't work here anyway, because this entity's webhook is already set.) This is the cleanest method for Part C; a future version could turn this log into an "add this group to entity X?" prompt and automate the insert below.
 
 ```sql
 insert into groups (entity_id, telegram_chat_id, display_name)
-values ('THE_EXISTING_ENTITY_ID', -100<new_group_chat_id>, 'HYS Board');
+values ('THE_EXISTING_ENTITY_ID', <new_group_chat_id>, 'HYS Board');
 ```
+
+> `<new_group_chat_id>` is the exact number from the log (it already includes its own sign/prefix — e.g. `-5577480409` — do **not** prepend anything).
 
 That's it for wiring — no Vault secrets, no repo, no webhook, no entity. The existing bot's webhook already routes messages from this group (the handler resolves the group by `chat_id`).
 

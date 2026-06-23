@@ -45,6 +45,9 @@ A `/context` slash command that shows what the bot is answering from in the curr
 ### Register bot commands (`setMyCommands`)
 The bot's command menu/autocomplete is empty until commands are registered (via BotFather `/setcommands` or the Bot API `setMyCommands`). Typing `/ask` works regardless (the handler parses text), but registering populates the `/` menu. Do `ask` + `help` (+ `context` once built). The Bot API path is preferable long-term (the future onboarding UI automates it). *Surfaced during first onboarding — B1 in DEPLOYMENT didn't include it.*
 
+### Better user-facing error messages (low priority)
+When the async answer step throws, the bot replies with a generic "Sorry, something went wrong." That's good baseline UX (the graceful path works), but it's opaque. Low-priority improvement: optionally append `error.message` (or a friendlier mapped version) so the user/operator sees *what* failed (e.g. "the model is temporarily overloaded — try again" for a 529, vs. a config error). Its own small project; distinguish transient/retryable errors (429/529, `x-should-retry: true`) — which could even auto-retry — from real failures. *Surfaced when an Anthropic 529 "overloaded" (a transient outage) produced the generic message.*
+
 ---
 
 ## Open — non-security polish
