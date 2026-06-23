@@ -148,7 +148,8 @@ export async function buildContext(
       from manifest_entries m
       join doc_cache c on c.entity_id = m.entity_id and c.doc_path = m.doc_path
       where m.entity_id = ${entityId}
-        and (m.telegram_thread_id is null or m.telegram_thread_id = ${threadIdStr})
+        and (m.telegram_thread_id is null
+             or m.telegram_thread_id is not distinct from ${threadIdStr})
     `;
 
     // Sort: general docs (thread_id is null) first, then thread-specific docs
@@ -319,5 +320,48 @@ export async function checkVaultSecretsHealth(
       ok: errors.length === 0,
       errors,
     };
+  });
+}
+
+/**
+ * Read-only: return the context docs that apply to a given entity + topic,
+ * structured by layer (entity-general vs topic-specific). Used by the /context
+ * command. Mirrors buildContext's manifest+cache resolution so /context shows
+ * exactly what /ask would answer from.
+ *
+ * NOTE (v1): group-layer scoping (manifest_entries.group_id) is not yet resolved
+ * here, matching buildContext. When group-scoped resolution lands (PLANNING §9),
+ * update BOTH this and buildContext together so they stay in sync.
+ */
+export async function getContextManifest(
+  entityId: string,
+  threadId: bigint | number | string | null
+): Promise<{
+  entityDocs: { doc_path: string; content: string }[];
+  topicDocs: { doc_path: string; content: string }[];
+}> {
+  const threadIdStr =
+    threadId !== null && threadId !== undefined ? threadId.toString() : null;
+
+  return await withTenantContext(entityId, async (tx) => {
+    const docs = await tx<{ telegram_thread_id: string | null; doc_path: string; content: string }[]>`
+      select m.telegram_thread_id, c.doc_path, c.content
+      from manifest_entries m
+      join doc_cache c on c.entity_id = m.entity_id and c.doc_path = m.doc_path
+      where m.entity_id = ${entityId}
+        and (m.telegram_thread_id is null
+             or m.telegram_thread_id is not distinct from ${threadIdStr})
+      order by c.doc_path
+    `;
+
+    const entityDocs = docs
+      .filter((d) => d.telegram_thread_id === null)
+      .map((d) => ({ doc_path: d.doc_path, content: d.content }));
+
+    const topicDocs = docs
+      .filter((d) => d.telegram_thread_id !== null)
+      .map((d) => ({ doc_path: d.doc_path, content: d.content }));
+
+    return { entityDocs, topicDocs };
   });
 }

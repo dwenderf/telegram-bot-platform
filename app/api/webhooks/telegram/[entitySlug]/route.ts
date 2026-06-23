@@ -6,11 +6,13 @@ import {
   resolveUser,
   answerQuestion,
   logMessage,
+  getContextManifest,
 } from '@/lib/capabilities';
 import {
   setMessageReaction,
   sendChatAction,
   sendMessage,
+  sendDocument,
   sanitizeForTelegramHtml,
 } from '@/lib/telegram';
 
@@ -99,6 +101,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     // Determine intents
     const isAskCommand = text.startsWith('/ask');
     const isHelpCommand = text.startsWith('/help');
+    const isContextCommand = text.startsWith('/context');
     const isMention = text.includes(`@${botUsername}`);
 
     let isCommand = false;
@@ -106,6 +109,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     let question = '';
 
     if (isHelpCommand) {
+      isCommand = true;
+    } else if (isContextCommand) {
       isCommand = true;
     } else if (isAskCommand) {
       isCommand = true;
@@ -143,6 +148,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         (async () => {
           const helpText = `<b>Telegram Bot Platform v1 Help</b>\n\n` +
             `• Use <code>/ask &lt;question&gt;</code> to ask me a question grounded in the repository context.\n` +
+            `• Use <code>/context</code> to see what documentation I'm answering from in this topic.\n` +
             `• Mention me <code>@${botUsername} &lt;question&gt;</code> inside a topic to ask a question.\n` +
             `• Use <code>/help</code> to see this message.`;
 
@@ -155,6 +161,63 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       );
 
       return NextResponse.json({ ok: true, msg: 'Help sent' });
+    }
+
+    // 7b. Respond to /context — show what the bot answers from here (read-only).
+    if (isContextCommand) {
+      waitUntil(
+        (async () => {
+          try {
+            const { entityDocs, topicDocs } = await getContextManifest(entity.id, threadId);
+
+            const totalDocs = entityDocs.length + topicDocs.length;
+
+            // (1) Inline summary — always small, always fits.
+            const summaryLines: string[] = [];
+            summaryLines.push(`<b>📚 Context for this topic</b>`);
+            summaryLines.push('');
+            summaryLines.push(`<b>Entity:</b> ${entityDocs.length > 0 ? entityDocs.map(d => `<code>${escapeHtml(d.doc_path)}</code>`).join(', ') : '<i>none</i>'}`);
+            // Group layer not resolved in v1 (PLANNING §9) — show as not-yet-scoped.
+            summaryLines.push(`<b>Group:</b> <i>none (group-scoped context not enabled)</i>`);
+            summaryLines.push(`<b>Topic:</b> ${topicDocs.length > 0 ? topicDocs.map(d => `<code>${escapeHtml(d.doc_path)}</code>`).join(', ') : '<i>none</i>'}`);
+            summaryLines.push('');
+            summaryLines.push(`Answering from <b>${totalDocs}</b> document${totalDocs === 1 ? '' : 's'}.`);
+
+            await sendMessage(
+              entity.telegram_bot_token,
+              message.chat.id,
+              summaryLines.join('\n'),
+              { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
+            );
+
+            // (2) Full content as an attached markdown file — only if there's content.
+            if (totalDocs > 0) {
+              const docMarkdown = buildContextDocument(entityDocs, topicDocs);
+              await sendDocument(
+                entity.telegram_bot_token,
+                message.chat.id,
+                'context.md',
+                docMarkdown,
+                { threadId, caption: 'Full context the bot answers from' }
+              );
+            }
+          } catch (err) {
+            console.error('Error handling /context:', err);
+            try {
+              await sendMessage(
+                entity.telegram_bot_token,
+                message.chat.id,
+                `⚠️ <i>Sorry, couldn't retrieve the context right now.</i>`,
+                { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
+              );
+            } catch (sendErr) {
+              console.error('Failed to send /context error fallback:', sendErr);
+            }
+          }
+        })()
+      );
+
+      return NextResponse.json({ ok: true, msg: 'Context sent' });
     }
 
     // 8. Respond to /ask or Mentions
@@ -222,4 +285,41 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     console.error('Telegram webhook handler crash:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
+}
+
+// Minimal HTML escape for inline summary (doc_paths are simple, but be safe).
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Assemble the full-context markdown document (Entity / Group / Topic sections).
+function buildContextDocument(
+  entityDocs: { doc_path: string; content: string }[],
+  topicDocs: { doc_path: string; content: string }[]
+): string {
+  const sections: string[] = [];
+  sections.push(`# Context the bot answers from\n`);
+
+  sections.push(`## Entity context\n`);
+  if (entityDocs.length > 0) {
+    for (const d of entityDocs) {
+      sections.push(`### ${d.doc_path}\n\n${d.content}\n`);
+    }
+  } else {
+    sections.push(`_No entity-general context._\n`);
+  }
+
+  sections.push(`## Group context\n`);
+  sections.push(`_Group-scoped context is not enabled in this version._\n`);
+
+  sections.push(`## Topic context\n`);
+  if (topicDocs.length > 0) {
+    for (const d of topicDocs) {
+      sections.push(`### ${d.doc_path}\n\n${d.content}\n`);
+    }
+  } else {
+    sections.push(`_No topic-specific context._\n`);
+  }
+
+  return sections.join('\n');
 }

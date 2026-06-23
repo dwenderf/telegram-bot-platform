@@ -140,3 +140,47 @@ export function sanitizeForTelegramHtml(raw: string): string {
 
   return parts.join('');
 }
+
+/**
+ * Uploads a text document (e.g. markdown) to a chat/thread as a file attachment.
+ * Uses multipart/form-data (required by Telegram for file uploads), so it does
+ * NOT go through callTelegramApi (which is JSON-only).
+ */
+export async function sendDocument(
+  token: string,
+  chatId: bigint | number,
+  filename: string,
+  content: string,
+  options: {
+    caption?: string;
+    threadId?: bigint | number | null;
+    parseMode?: 'HTML' | 'MarkdownV2' | string;
+  } = {}
+): Promise<any> {
+  const url = `https://api.telegram.org/bot${token}/sendDocument`;
+
+  const form = new FormData();
+  form.append('chat_id', chatId.toString());
+
+  // The file part. Use a Blob with a text/markdown mime type.
+  const blob = new Blob([content], { type: 'text/markdown' });
+  form.append('document', blob, filename);
+
+  if (options.caption) {
+    form.append('caption', options.caption);
+    if (options.parseMode) form.append('parse_mode', options.parseMode);
+  }
+  if (options.threadId !== undefined && options.threadId !== null) {
+    form.append('message_thread_id', Number(options.threadId).toString());
+  }
+
+  // NOTE: do NOT set Content-Type manually — fetch sets the multipart boundary.
+  const res = await fetch(url, { method: 'POST', body: form });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Telegram API call sendDocument failed (${res.status}): ${errorText}`);
+  }
+
+  return await res.json();
+}
