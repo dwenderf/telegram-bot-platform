@@ -53,6 +53,8 @@ ALTER ROLE bot_service SET app.current_entity_id = '';
 
 > **For the complete, step-by-step setup and deployment runbook — Supabase project, Vault, the `bot_service` role, the schema migration, Vercel deploy, DNS, and per-tenant onboarding (Telegram bot, secrets, content repo, webhooks) — see [`DEPLOYMENT.md`](./DEPLOYMENT.md).** The quick start below is the abbreviated local-dev path; `DEPLOYMENT.md` is the authoritative end-to-end guide.
 
+> **Design docs** live in [`docs/`](./docs/): [`PLANNING.md`](./docs/PLANNING.md) (architecture of record + build spec), [`SECURITY-PROPOSAL.md`](./docs/SECURITY-PROPOSAL.md) (tenant-isolation/RLS model), [`MANAGEMENT-PROPOSAL.md`](./docs/MANAGEMENT-PROPOSAL.md) (future web-management plane), and [`BACKLOG.md`](./docs/BACKLOG.md). Feature build-specs live in [`docs/specs/`](./docs/specs/).
+
 ### 1. Configure Environment Variables
 Copy the `.env.example` file and supply your environment details:
 ```bash

@@ -1,6 +1,6 @@
 # Deployment & Setup Guide
 
-> How to stand up the Kenntnis platform from scratch and onboard your first tenant. This is the operational runbook; for *what* the system is and *why* it's built this way, see `README.md` (overview) and `PLANNING.md` (architecture).
+> How to stand up the Kenntnis platform from scratch and onboard your first tenant. This is the operational runbook; for *what* the system is and *why* it's built this way, see `README.md` (overview) and [`docs/PLANNING.md`](./docs/PLANNING.md) (architecture). Other design docs live in [`docs/`](./docs/) (`SECURITY-PROPOSAL.md`, `MANAGEMENT-PROPOSAL.md`, `BACKLOG.md`) and feature specs in `docs/specs/`.
 
 > **Structure — three flows:**
 > - **Part A** — one-time **platform** setup (do once, ever).
