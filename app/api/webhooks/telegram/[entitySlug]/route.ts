@@ -138,6 +138,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const entityLabel = entity?.slug ?? 'unregistered';
       const groupLabel = group?.display_name ?? 'unregistered';
 
+      // Compute exclusion status so /whoami can report WHY the bot is silent here.
+      // (This is the diagnostic value of /whoami running above the excluded gate.)
+      const whoamiExcluded =
+        threadId !== null &&
+        entity.excluded_thread_ids &&
+        entity.excluded_thread_ids.some(
+          (id: any) => id.toString() === threadId.toString()
+        );
+
       const lines = [
         '<b>🪪 whoami</b>',
         '',
@@ -148,16 +157,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         '',
         `<b>Entity:</b> ${escapeHtml(entityLabel)}`,
         `<b>Group:</b> ${escapeHtml(groupLabel)}`,
+        `<b>Topic status:</b> ${whoamiExcluded ? '⛔️ <i>excluded (bot does not operate here)</i>' : '✅ <i>active</i>'}`,
       ];
 
       // Log the command execution only if group is registered
       if (group) {
-        const isExcluded =
-          threadId !== null &&
-          entity.excluded_thread_ids &&
-          entity.excluded_thread_ids.some(
-            (id: any) => id.toString() === threadId.toString()
-          );
+        const isExcluded = whoamiExcluded;
 
         if (!isExcluded) {
           try {
@@ -194,7 +199,16 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ ok: true, msg: 'Untracked group' });
     }
 
-    // 6. Log the message unless the thread is in excluded-topics config
+    // 5d. Excluded-thread gate (single choke point for ALL commands below).
+    // If this thread is in the entity's excluded_thread_ids, the bot stays out:
+    //   - it does NOT log the message, and
+    //   - it does NOT dispatch any command (/help, /context, /recap, /ask, @mention).
+    // It declines ONCE, but only when actually addressed (a command or @mention),
+    // so it stays silent on ordinary chatter in the excluded thread.
+    // (/whoami is intentionally handled in 5b, ABOVE this gate, so it still works
+    // here as a diagnostic — including reporting that this thread is excluded.)
+    // Placing the gate here means every current AND future command inherits this
+    // behavior automatically — no per-command exclusion check to maintain.
     const isExcluded =
       threadId !== null &&
       entity.excluded_thread_ids &&
@@ -202,19 +216,37 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         (id: any) => id.toString() === threadId.toString()
       );
 
-    if (!isExcluded) {
-      await logMessage({
-        entityId: entity.id,
-        groupId: group.id,
-        telegramChatId: message.chat.id,
-        telegramThreadId: threadId,
-        telegramUserId: message.from?.id || null,
-        username: message.from?.username || message.from?.first_name || 'User',
-        messageText: text,
-        isCommand,
-        isBotMention,
-      });
+    if (isExcluded) {
+      if (isCommand || isBotMention) {
+        // Addressed directly → decline once so the user isn't left wondering.
+        try {
+          await sendMessage(
+            entity.telegram_bot_token,
+            message.chat.id,
+            `⛔️ <i>I'm not configured to operate in this topic.</i>`,
+            { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
+          );
+        } catch (err) {
+          console.error('Failed to send excluded-thread notice:', err);
+        }
+      }
+      // Either way: do not log, do not dispatch any command.
+      return NextResponse.json({ ok: true, msg: 'Excluded thread' });
     }
+
+    // 6. Log the message (we're past the excluded-thread gate, so the thread is
+    //    not excluded — log unconditionally).
+    await logMessage({
+      entityId: entity.id,
+      groupId: group.id,
+      telegramChatId: message.chat.id,
+      telegramThreadId: threadId,
+      telegramUserId: message.from?.id || null,
+      username: message.from?.username || message.from?.first_name || 'User',
+      messageText: text,
+      isCommand,
+      isBotMention,
+    });
 
     // 7. Respond to /help
     if (isHelpCommand) {
