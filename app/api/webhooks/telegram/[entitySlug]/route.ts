@@ -40,7 +40,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     const entity = await withTenantContext(entityId, async (tx) => {
       const rows = await tx<any[]>`
-        select e.id, e.telegram_bot_username, e.excluded_thread_ids,
+        select e.id, e.slug, e.telegram_bot_username, e.excluded_thread_ids,
                get_current_entity_secret(e.telegram_bot_token_id) as telegram_bot_token,
                get_current_entity_secret(e.telegram_webhook_secret_id) as telegram_webhook_secret
         from entities e
@@ -87,13 +87,6 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     }
 
     // 5. Resolve group and verify it matches the current entity
-    const tenantInfo = await resolveTenant(entity.id, message.chat.id);
-    if (!tenantInfo || tenantInfo.entity.id !== entity.id) {
-      console.info(`Message received from untracked chat ID: ${message.chat.id}`);
-      return NextResponse.json({ ok: true, msg: 'Untracked group' });
-    }
-
-    const { group } = tenantInfo;
     const text = message.text.trim();
     const botUsername = entity.telegram_bot_username;
     const threadId = message.message_thread_id !== undefined ? message.message_thread_id : null;
@@ -102,6 +95,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const isAskCommand = text.startsWith('/ask');
     const isHelpCommand = text.startsWith('/help');
     const isContextCommand = text.startsWith('/context');
+    const isWhoamiCommand = text.startsWith('/whoami');
     const isMention = text.includes(`@${botUsername}`);
 
     let isCommand = false;
@@ -112,12 +106,84 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       isCommand = true;
     } else if (isContextCommand) {
       isCommand = true;
+    } else if (isWhoamiCommand) {
+      isCommand = true;
     } else if (isAskCommand) {
       isCommand = true;
       question = text.replace(/^\/ask(?:@[a-zA-Z0-9_]+)?\s*/i, '');
     } else if (isMention) {
       isBotMention = true;
       question = text.replace(new RegExp(`@${botUsername}\\s*`, 'gi'), '');
+    }
+
+    // 5. Resolve group context if registered
+    const tenantInfo = await resolveTenant(entity.id, message.chat.id);
+    const group = tenantInfo && tenantInfo.entity.id === entity.id ? tenantInfo.group : null;
+
+    // 5b. Respond to /whoami — echo the raw Telegram ids + resolved entity/group when known.
+    // MUST run before the untracked-group bail-out so it works during onboarding.
+    if (isWhoamiCommand) {
+      const chatId = message.chat.id;
+      const fromId = message.from?.id ?? null;
+      const fromUsername = message.from?.username ?? null;
+
+      const entityLabel = entity?.slug ?? 'unregistered';
+      const groupLabel = group?.display_name ?? 'unregistered';
+
+      const lines = [
+        '<b>🪪 whoami</b>',
+        '',
+        `<b>Chat ID:</b> <code>${chatId}</code>`,
+        `<b>Topic (thread) ID:</b> ${threadId === null ? '<i>General (none)</i>' : `<code>${threadId}</code>`}`,
+        `<b>Your user ID:</b> ${fromId === null ? '<i>unknown</i>' : `<code>${fromId}</code>`}`,
+        `<b>Your username:</b> ${fromUsername ? `@${escapeHtml(fromUsername)}` : '<i>none set</i>'}`,
+        '',
+        `<b>Entity:</b> ${escapeHtml(entityLabel)}`,
+        `<b>Group:</b> ${escapeHtml(groupLabel)}`,
+      ];
+
+      // Log the command execution only if group is registered
+      if (group) {
+        const isExcluded =
+          threadId !== null &&
+          entity.excluded_thread_ids &&
+          entity.excluded_thread_ids.some(
+            (id: any) => id.toString() === threadId.toString()
+          );
+
+        if (!isExcluded) {
+          try {
+            await logMessage({
+              entityId: entity.id,
+              groupId: group.id,
+              telegramChatId: chatId,
+              telegramThreadId: threadId,
+              telegramUserId: fromId,
+              username: fromUsername || message.from?.first_name || 'User',
+              messageText: text,
+              isCommand: true,
+              isBotMention: false,
+            });
+          } catch (err) {
+            console.error('Failed to log whoami command:', err);
+          }
+        }
+      }
+
+      await sendMessage(
+        entity.telegram_bot_token,
+        chatId,
+        lines.join('\n'),
+        { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
+      );
+
+      return NextResponse.json({ ok: true, msg: 'whoami sent' });
+    }
+
+    // 5c. Resolve group check for non-whoami requests — bail early if untracked
+    if (!group) {
+      console.info(`Message received from untracked chat ID: ${message.chat.id}`);
+      return NextResponse.json({ ok: true, msg: 'Untracked group' });
     }
 
     // 6. Log the message unless the thread is in excluded-topics config
@@ -149,6 +215,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           const helpText = `<b>Telegram Bot Platform v1 Help</b>\n\n` +
             `• Use <code>/ask &lt;question&gt;</code> to ask me a question grounded in the repository context.\n` +
             `• Use <code>/context</code> to see what documentation I'm answering from in this topic.\n` +
+            `• Use <code>/whoami</code> to show this chat's ids (useful for setup/diagnostics).\n` +
             `• Mention me <code>@${botUsername} &lt;question&gt;</code> inside a topic to ask a question.\n` +
             `• Use <code>/help</code> to see this message.`;
 
@@ -331,4 +398,8 @@ function buildContextDocument(
   }
 
   return sections.join('\n');
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

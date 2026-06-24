@@ -298,18 +298,16 @@ values (
 );
 ```
 
-> **Getting `telegram_chat_id` — the bot tells you (no third-party bot needed).** The chat id is a large negative number (supergroups look like `-1001234567890`). The reliable, safe way is to let *your own* bot report it via the platform's logs:
+> **Getting `telegram_chat_id` — the bot tells you (no third-party bot needed).** The chat id is a large negative number (supergroups look like `-1001234567890`). Let *your own* bot report it — two ways, both safe:
 >
-> 1. **Set this entity's webhook first** — run the **B6** `setWebhook` block (it uses `BOT_TOKEN` / `SLUG` / `SECRET`). Confirm it returns `"Webhook was set"`. (Yes, this means doing B6 *before* finishing B4's group insert — that's expected; the bot has to be receiving updates to report the chat id.)
-> 2. **Send any message in the group's General topic.** The bot receives it, finds no matching `groups` row yet, and **logs the chat id** in the **Vercel logs** as:
->    ```
->    Message received from untracked chat ID: -1001234567890
->    ```
-> 3. **Copy that number** — it's your `telegram_chat_id` (it already includes the `-100…` sign/prefix; don't add anything). Use it in the group insert above, then send another message to confirm the bot now responds.
+> **✅ Preferred — `/whoami` (works even before the group is registered):**
+> 1. Set this entity's webhook (run the **B6** `setWebhook` block; confirm `"Webhook was set"`). The bot has to be receiving updates to answer.
+> 2. In the group, send **`/whoami`**. The bot replies in-chat with the **Chat ID**, the current **Topic (thread) ID**, your user id, and the resolved Entity (Group shows `unregistered` until you do the insert below — that's expected).
+> 3. Copy the **Chat ID** from the reply into the group insert above (it already includes the `-100…` prefix; don't add anything). `/whoami` also gives you a topic's `message_thread_id` directly — handy for per-topic manifest entries in B5.
 >
-> *(For a topic's `message_thread_id` — needed only for per-topic manifest entries in B5 — the same applies once `/whoami` ships; until then, the General topic is null-threaded and entity-general docs are all most setups need.)*
+> **✅ Fallback — the "untracked chat ID" log:** if `/whoami` isn't registered yet (very first onboarding, before B7), send any message in the group and read the chat id from the Vercel log line `Message received from untracked chat ID: -1001234567890`. Same value, just via the logs instead of in-chat.
 >
-> ⚠️ **Do NOT use third-party "get-ID" utility bots** (e.g. `@RawDataBot` and lookalikes). Adding one puts an **unknown third party inside your group, reading its messages**, and Telegram bot usernames are **dangerously confusable** — it's easy to add a malicious lookalike (e.g. `@raw_data_botbot` instead of `@RawDataBot`) that silently harvests the group. The log method above uses *only your own* bot and exposes nothing. There is no good reason to add an outside bot just to read a chat id.
+> ⚠️ **Do NOT use third-party "get-ID" utility bots** (e.g. `@RawDataBot` and lookalikes). Adding one puts an **unknown third party inside your group, reading its messages**, and Telegram bot usernames are **dangerously confusable** — it's easy to add a malicious lookalike (e.g. `@raw_data_botbot` instead of `@RawDataBot`) that silently harvests the group. Both methods above use *only your own* bot and expose nothing. There is no good reason to add an outside bot just to read a chat id.
 
 ## B5. Bootstrap content into the cache + manifest
 
@@ -379,11 +377,12 @@ curl "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands" \
   -d '{"commands":[
     {"command":"ask","description":"Ask a question grounded in the team docs"},
     {"command":"context","description":"See what docs the bot answers from here"},
+    {"command":"whoami","description":"Show this chat's ids (setup/diagnostics)"},
     {"command":"help","description":"Show what the bot can do"}
   ]}'
 ```
 
-> Expect `{"ok":true,"result":true}`. The menu is **per-bot**, so this is a one-time step per entity (each entity has its own bot). Re-run it whenever the command set changes (e.g. when a new command ships). Keep this list in sync with the commands the handler actually implements (currently `/ask`, `/context`, `/help`; `@mention` is not a slash command so it isn't listed).
+> Expect `{"ok":true,"result":true}`. The menu is **per-bot**, so this is a one-time step per entity (each entity has its own bot). Re-run it whenever the command set changes (e.g. when a new command ships). Keep this list in sync with the commands the handler actually implements (currently `/ask`, `/context`, `/whoami`, `/help`; `@mention` is not a slash command so it isn't listed).
 >
 > *(Future: the onboarding UI will call `setMyCommands` automatically right after storing the bot token — it's one of the "everything after the token is automatable" steps; see `PLANNING.md` §9.)*
 
