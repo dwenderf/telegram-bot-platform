@@ -5,15 +5,15 @@ export interface Entity {
   id: string;
   slug: string;
   display_name: string;
-  github_owner: string;
-  github_repo: string;
-  github_branch: string;
-  context_root: string;
+  github_owner: string | null;
+  github_repo: string | null;
+  github_branch: string | null;
+  context_root: string | null;
   telegram_bot_username: string;
   excluded_thread_ids: string[];
   telegram_bot_token: string;
   telegram_webhook_secret: string;
-  github_token: string;
+  github_token: string | null;
   created_at: Date;
 }
 

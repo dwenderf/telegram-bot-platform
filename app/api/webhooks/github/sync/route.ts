@@ -3,6 +3,7 @@ import { waitUntil } from '@vercel/functions';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { sql, withTenantContext } from '@/lib/supabase';
 import { fetchGitHubFile, compareGitHubCommits } from '@/lib/github';
+import { Entity } from '@/lib/capabilities';
 
 /**
  * Verify GitHub webhook HMAC-SHA256 signature
@@ -61,7 +62,7 @@ export async function POST(req: NextRequest) {
     // 3. Fetch config inside the RLS context of the resolved entity ID
     // We fetch the decrypted GitHub PAT token using get_current_entity_secret
     const entity = await withTenantContext(entityId, async (tx) => {
-      const rows = await tx<any[]>`
+      const rows = await tx<Entity[]>`
         select e.id, e.slug, e.github_owner, e.github_repo, e.github_branch, e.context_root,
                get_current_entity_secret(e.github_token_id) as github_token
         from entities e
@@ -75,8 +76,26 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, msg: 'Tenant config mismatch' });
     }
 
+    // Gracefully check for incomplete configuration or missing token (e.g. in v1)
+    if (
+      !entity.github_owner ||
+      !entity.github_repo ||
+      !entity.github_branch ||
+      !entity.context_root ||
+      !entity.github_token
+    ) {
+      console.info(`Skipping GitHub sync for entity ${entity.slug}: incomplete GitHub configuration or missing Vault token`);
+      return NextResponse.json({ ok: true, msg: 'GitHub configuration incomplete' });
+    }
+
+    const githubOwner = entity.github_owner;
+    const githubRepo = entity.github_repo;
+    const githubBranch = entity.github_branch;
+    const contextRoot = entity.context_root;
+    const githubToken = entity.github_token;
+
     // Verify the push is on the tracked branch
-    if (branchName !== entity.github_branch) {
+    if (branchName !== githubBranch) {
       return NextResponse.json({ ok: true, msg: `Ignoring push to non-tracked branch: ${branchName}` });
     }
 
@@ -94,14 +113,14 @@ export async function POST(req: NextRequest) {
 
           // Fetch commit diff from GitHub Compare API using decrypted token
           const { added, modified, removed, renamed } = await compareGitHubCommits(
-            entity.github_owner,
-            entity.github_repo,
+            githubOwner,
+            githubRepo,
             before,
             after,
-            entity.github_token
+            githubToken
           );
 
-          const contextPrefix = `${entity.context_root}/`;
+          const contextPrefix = `${contextRoot}/`;
           const isContextFile = (path: string) => path.startsWith(contextPrefix) && path.endsWith('.md');
 
           // Process deletions and updates within the RLS context
@@ -132,11 +151,11 @@ export async function POST(req: NextRequest) {
               try {
                 // Fetch latest file content and Git SHA from GitHub
                 const fileData = await fetchGitHubFile(
-                  entity.github_owner,
-                  entity.github_repo,
+                  githubOwner,
+                  githubRepo,
                   path,
-                  entity.github_branch,
-                  entity.github_token
+                  githubBranch,
+                  githubToken
                 );
 
                 // Upsert file cache in database

@@ -259,21 +259,26 @@ Run in the SQL editor (which connects as `postgres` and **bypasses RLS** — thi
 
 ```sql
 -- Insert the entity, referencing the two Vault secret UUIDs from B3.
--- NOTE: github_* columns are NOT NULL in the schema, so values are required even
--- though v1 doesn't use GitHub. They're unused in the v1 path (only the unused
--- GitHub-sync route reads them). Supply nominal values (the repo you'd use later,
--- or placeholders). github_token_id is nullable → leave null in v1.
+-- Replace every <...> placeholder before running; nothing here is runnable as-is.
+-- v1 omits all github_* columns: they're nullable (migration
+-- 20260624000000_relax_github_columns.sql) and unused in the v1 direct-to-cache
+-- path. They only matter if the optional GitHub sync-source is enabled later.
 insert into entities (
-  slug, display_name, github_owner, github_repo, github_branch, context_root,
+  slug, display_name,
   telegram_bot_username, excluded_thread_ids,
-  telegram_bot_token_id, telegram_webhook_secret_id, github_token_id
+  telegram_bot_token_id, telegram_webhook_secret_id
 ) values (
-  'hys', 'Hudson Yards Studios', 'dwenderf', 'hys-context', 'main', 'context',
-  'kenntnis_hys_bot', '{}',
-  'BOT_TOKEN_SECRET_UUID', 'WEBHOOK_SECRET_UUID', null
+  '<your_slug>',                 -- routing key: lowercase/URL-safe/stable, e.g. hys
+  '<your_entity_display_name>',  -- human-facing name, e.g. Hudson Yards Studios
+  '<your_bot_username>',         -- bare bot username (no @), e.g. kenntnis_hys_bot
+  '{}',                          -- excluded_thread_ids: empty array is fine
+  '<BOT_TOKEN_SECRET_UUID>',     -- UUID from B3 Secret 1
+  '<WEBHOOK_SECRET_UUID>'        -- UUID from B3 Secret 2
 )
 returning id;
 ```
+
+> *(`github_owner`, `github_repo`, `github_branch`, `context_root`, and `github_token_id` are all nullable and left null in v1. Earlier drafts required nominal placeholder values here because the columns were `NOT NULL`; migration `20260624000000_relax_github_columns.sql` relaxed them, so you can omit them entirely.)*
 
 > ✅ **Verified (first onboarding):** the entity insert succeeds in the SQL editor and returns the `id`. Because the editor connects as `postgres` (superuser), it bypasses the `WITH CHECK` RLS policy — which is why entity *creation* works here even though `bot_service` couldn't bootstrap a brand-new entity's first row. **Entity creation is a privileged admin action; only the running app uses `bot_service`.** (Future: an admin function/UI will do this insert programmatically as a privileged role — see `PLANNING.md` §9.)
 
@@ -286,7 +291,11 @@ Then capture the returned `entity_id` and insert the **first** group (e.g. "HYS 
 
 ```sql
 insert into groups (entity_id, telegram_chat_id, display_name)
-values ('THE_ENTITY_ID', -1001234567890, 'HYS Internal');
+values (
+  '<entity_id_from_above>',   -- the id returned by the entity insert
+  <your_group_chat_id>,       -- the -100... supergroup id (see below); a number, not quoted
+  '<your_group_display_name>' -- e.g. HYS Internal
+);
 ```
 
 > **Getting `telegram_chat_id` (and topic `message_thread_id`).** The chat id is a large negative number (supergroups look like `-1001234567890`). Two practical ways:
@@ -506,7 +515,7 @@ select vault.update_secret(
 ## Open items this guide surfaced (for BACKLOG / Antigravity confirmation)
 
 - **`prepare: false` in `lib/supabase.ts`** (A7) — ✅ confirmed set; required for the Supavisor transaction pooler.
-- **`github_*` columns are NOT NULL but unused in v1** (B4) — the entity insert must supply nominal `github_owner/repo/branch/context_root` even though v1 doesn't use GitHub. Consider a future migration to make them nullable (or move them to a separate `sync_sources` config) when the content-store abstraction is formalized.
+- **`github_*` columns relaxed to nullable** (B4) — ✅ done (migration `20260624000000_relax_github_columns.sql`). The entity insert no longer supplies nominal `github_owner/repo/branch/context_root` values; they're nullable and omitted in v1. (Future: a `sync_sources` refactor could move GitHub config out of `entities` entirely when the content-store abstraction is formalized — still a `PLANNING.md`/BACKLOG item.) **Coordinated code change:** the `Entity` TS interface in `lib/capabilities.ts` should mark `github_owner/repo/branch/context_root` and `github_token` as `string | null` to match.
 - **No cache-rebuild / bulk-seed endpoint** (B5) — v1 content is pushed via manual SQL upserts. A small admin endpoint (or eventual UI) to manage `doc_cache` content would replace the manual SQL; this is the v1 content-management path for now.
 - **`checkVaultSecretsHealth` is not exposed via any route** (A9) — wire it to a small admin/health endpoint for pre-launch verification (also a natural home for a privacy-mode check via `getMe`).
 - **`package.json` name is still `temp-next`** — rename to the project.
