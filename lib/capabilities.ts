@@ -318,6 +318,66 @@ export async function logBotResponse(input: {
   });
 }
 
+/**
+ * Summarize the last `limit` messages in a thread. Reads message_log (user msgs +
+ * bot responses), formatting each as "Name: text". Uses coalesce(summary, message_text)
+ * so long bot answers contribute their stored summary once Phase 2 populates it
+ * (today summary is null → falls back to full text). Thread-scoped.
+ */
+export async function recapConversation(input: {
+  entityId: string;
+  groupId: string;
+  threadId: bigint | number | string | null;
+  limit: number;
+}): Promise<{ recapText: string }> {
+  const threadIdStr =
+    input.threadId !== null && input.threadId !== undefined ? input.threadId.toString() : null;
+
+  const transcript = await withTenantContext(input.entityId, async (tx) => {
+    const rows = await tx<{ username: string | null; body: string | null; is_bot_response: boolean }[]>`
+      select username,
+             coalesce(summary, message_text) as body,
+             is_bot_response
+      from message_log
+      where group_id = ${input.groupId}
+        and telegram_thread_id is not distinct from ${threadIdStr}
+        and message_text is not null
+      order by created_at desc
+      limit ${input.limit}
+    `;
+    // rows are newest-first; reverse to chronological for the transcript
+    return rows.reverse()
+      .map((m) => `${m.username || (m.is_bot_response ? 'Bot' : 'User')}: ${m.body || ''}`)
+      .join('\n');
+  });
+
+  if (!transcript.trim()) {
+    return { recapText: 'There are no recent messages in this topic to recap yet.' };
+  }
+
+  const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+  const systemPrompt = `You are summarizing a team chat conversation. Produce a concise, well-organized recap of the discussion below.
+
+OUTPUT FORMAT RULES (CRITICAL):
+- Use Telegram-HTML format.
+- ONLY these tags: <b>, <i>, <u>, <s>, <code>, <pre>, <a href="...">.
+- Use "• " for bullet points.
+- No <p>, <ul>, <li>, <h1>, <div>, etc.
+- Escape literal <, >, & as &lt; &gt; &amp;.
+
+Guidelines:
+- Lead with a one-line <b>summary</b>, then key points / decisions / open questions as bullets.
+- Attribute notable points to who said them when useful.
+- Be faithful to the transcript; do not invent. If it's short, keep the recap short.`;
+
+  const result = await callModel({
+    systemPrompt,
+    userMessage: `Recap the last ${input.limit} messages of this conversation:\n\n${transcript}`,
+    model,
+  });
+
+  return { recapText: result.text };
+}
 
 /**
  * Verify that active secret handles in entities resolve to valid tokens in Vault.

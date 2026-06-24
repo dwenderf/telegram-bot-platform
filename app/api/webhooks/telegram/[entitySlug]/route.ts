@@ -8,6 +8,7 @@ import {
   logMessage,
   getContextManifest,
   logBotResponse,
+  recapConversation,
 } from '@/lib/capabilities';
 import {
   setMessageReaction,
@@ -16,6 +17,9 @@ import {
   sendDocument,
   sanitizeForTelegramHtml,
 } from '@/lib/telegram';
+
+const DEFAULT_RECAP = 20;
+const MAX_RECAP = 100;
 
 interface RouteParams {
   params: Promise<{
@@ -97,6 +101,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const isHelpCommand = text.startsWith('/help');
     const isContextCommand = text.startsWith('/context');
     const isWhoamiCommand = text.startsWith('/whoami');
+    const isRecapCommand = text.startsWith('/recap');
     const isMention = text.includes(`@${botUsername}`);
 
     let isCommand = false;
@@ -108,6 +113,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     } else if (isContextCommand) {
       isCommand = true;
     } else if (isWhoamiCommand) {
+      isCommand = true;
+    } else if (isRecapCommand) {
       isCommand = true;
     } else if (isAskCommand) {
       isCommand = true;
@@ -216,6 +223,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           const helpText = `<b>Telegram Bot Platform v1 Help</b>\n\n` +
             `• Use <code>/ask &lt;question&gt;</code> to ask me a question grounded in the repository context.\n` +
             `• Use <code>/context</code> to see what documentation I'm answering from in this topic.\n` +
+            `• Use <code>/recap [N]</code> to summarize the last N messages here (default 20).\n` +
             `• Use <code>/whoami</code> to show this chat's ids (useful for setup/diagnostics).\n` +
             `• Mention me <code>@${botUsername} &lt;question&gt;</code> inside a topic to ask a question.\n` +
             `• Use <code>/help</code> to see this message.`;
@@ -300,6 +308,96 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       );
 
       return NextResponse.json({ ok: true, msg: 'Context sent' });
+    }
+
+    // 7c. Respond to /recap — summarize the last N messages in this thread (model call).
+    if (isRecapCommand) {
+      // Parse requested limit
+      const recapArg = text.replace(/^\/recap(?:@[a-zA-Z0-9_]+)?\s*/i, '').trim();
+
+      let requested = parseInt(recapArg, 10);
+      let note = ''; // optional user-facing note about clamping/fallback
+
+      if (!Number.isInteger(requested) || requested <= 0) {
+        requested = DEFAULT_RECAP;
+        if (recapArg.length > 0) {
+          note = `Didn't catch a number, recapping the last ${DEFAULT_RECAP}.`;
+        }
+      } else if (requested > MAX_RECAP) {
+        requested = MAX_RECAP;
+        note = `Recapping the last ${MAX_RECAP} messages (max).`;
+      }
+
+      // 1. Immediate ack (same as /ask): 👀 + typing
+      try {
+        await setMessageReaction(entity.telegram_bot_token, message.chat.id, message.message_id, '👀');
+      } catch (err) {
+        console.error('Failed to set eyes reaction:', err);
+      }
+      try {
+        await sendChatAction(entity.telegram_bot_token, message.chat.id, 'typing', threadId);
+      } catch (err) {
+        console.error('Failed to send typing action:', err);
+      }
+
+      // 2. Slow part async
+      waitUntil(
+        (async () => {
+          try {
+            const { recapText } = await recapConversation({
+              entityId: entity.id,
+              groupId: group.id,
+              threadId,
+              limit: requested,
+            });
+
+            const prefix = note ? `<i>${escapeHtml(note)}</i>\n\n` : '';
+            const sanitized = sanitizeForTelegramHtml(recapText);
+
+            await sendMessage(
+              entity.telegram_bot_token,
+              message.chat.id,
+              prefix + sanitized,
+              { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
+            );
+
+            // Phase 1 storage: a recap IS a bot response → log it (so the log stays complete).
+            try {
+              await logBotResponse({
+                entityId: entity.id,
+                groupId: group.id,
+                telegramChatId: message.chat.id,
+                telegramThreadId: threadId,
+                botUsername: entity.telegram_bot_username,
+                messageText: recapText,
+                summary: null,
+                generationMetadata: {
+                  model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+                  thread_id: threadId,
+                  kind: 'recap',
+                  recap_limit: requested,
+                },
+              });
+            } catch (err) {
+              console.error('Failed to log recap response:', err);
+            }
+          } catch (err) {
+            console.error('Error handling /recap:', err);
+            try {
+              await sendMessage(
+                entity.telegram_bot_token,
+                message.chat.id,
+                `⚠️ <i>Sorry, couldn't build a recap right now.</i>`,
+                { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
+              );
+            } catch (sendErr) {
+              console.error('Failed to send /recap error fallback:', sendErr);
+            }
+          }
+        })()
+      );
+
+      return NextResponse.json({ ok: true, msg: 'Recap processing' });
     }
 
     // 8. Respond to /ask or Mentions

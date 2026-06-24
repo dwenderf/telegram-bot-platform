@@ -12,6 +12,7 @@ export interface BotCommand {
 export const BOT_COMMANDS: BotCommand[] = [
   { command: 'ask',     description: 'Ask a question grounded in the team docs' },
   { command: 'context', description: 'See what docs the bot answers from here' },
+  { command: 'recap',   description: 'Summarize the last messages in this topic' },
   { command: 'whoami',  description: "Show this chat's ids (setup/diagnostics)" },
   { command: 'help',    description: 'Show what the bot can do' },
 ];
