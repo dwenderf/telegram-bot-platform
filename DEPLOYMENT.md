@@ -426,8 +426,9 @@ curl "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands" \
 3. `@mention` the bot with a question → same as `/ask`.
 4. Send `/context` → expect an inline summary of which docs load here, followed by a `context.md` file attachment with the full content. (In a topic with no docs, the summary shows "none" and no file is sent.)
 5. Send `/whoami` → expect the chat id, topic/thread id, your user id, and the resolved entity/group echoed in-thread.
-6. Send a plain (non-command) message → confirm a `message_log` row appears (validates privacy mode is off and message-logging works).
-7. **Update content:** re-run the B5 `doc_cache` upsert with edited content → the next `/ask` reflects the change (confirms the cache is the live source).
+6. Send `/recap` → expect the 👀 reaction, then a recap of the last messages in this topic (default 20). Try `/recap 5` (recaps 5), `/recap 999` (clamps to the max, notes it), and `/recap banana` (falls back to default, notes it). A recap reflects BOTH user questions and the bot's prior answers (confirms bot-response logging from the message-history storage is feeding it).
+7. Send a plain (non-command) message → confirm a `message_log` row appears (validates privacy mode is off and message-logging works).
+8. **Update content:** re-run the B5 `doc_cache` upsert with edited content → the next `/ask` reflects the change (confirms the cache is the live source).
 
 > **If `/ask` replies "Sorry, something went wrong":** that's the graceful error path — the pipeline worked but the async answer step threw. Check the Vercel logs. A common first-run cause is a **deprecated model id**: `Anthropic API call failed: 404 ... "model: <id>"` means `ANTHROPIC_MODEL` (or the code default) points at a retired model. Fix by setting `ANTHROPIC_MODEL` to a current id (e.g. `claude-sonnet-4-6`) and redeploying — no other change needed. (Model ids get deprecated over time; this is why it's an env var.)
 
