@@ -35,15 +35,18 @@ v1 content is pushed directly into `doc_cache` via SQL upserts (no GitHub in v1 
 
 ## Open — near-term features
 
-### /context command (read-only context viewer)
-A `/context` slash command that shows what the bot is answering from in the current entity + topic. Two parts:
-- **Inline summary:** a short manifest/index view — which docs load here (e.g. "answering from: [general] overview.md, [topic] none"). Small, always useful; surfaces content gaps.
-- **Full content as attached markdown file(s):** the actual loaded context (global/group doc + any topic doc) uploaded as Telegram file(s), sidestepping the ~4096-char message limit (same "Telegram holds a file of any size" insight as the `/draft` reframe).
+### Chat history: store bot responses + provenance metadata (foundation), summary-based retrieval (later)
+Today only *incoming* (user) messages are logged to `message_log`; the bot's own answers are not stored, so a follow-up question can't draw on what the bot previously said. Build this in phases (deliberately separable):
 
-*Why it matters:* makes the bot's knowledge transparent (trust/debugging, spotting content gaps), and is the read-only Telegram precursor to web-app content viewing/editing. Small build, exercises the "adding a command is easy" claim, good first thing to build after the multi-group test. Read-command (no model call) — simpler than `/ask`.
+- **Phase 1 — store the bot's response (cheap, do first).** On sending an answer, write a `message_log` row for the bot's outgoing message (full text). Pure upside: completes the history, and gives real data to *measure* whether follow-ups actually reference prior answers before investing in retrieval logic. No model changes.
+- **Phase 2 — inline summary for long answers (UX-neutral, write-time).** Add a nullable `summary` column to `message_log`. For **long** bot responses only, have the model emit a 1–2 sentence summary **in the same generation call** that produces the answer (cheap — only the summary's output tokens; the model already has full context, so no extra round-trip / no re-sending the answer as input). User-facing reply is unchanged (details only, as today); the summary is stored, not shown. `summary` is null for user messages and short bot responses.
+- **Phase 3 — summary-based retrieval (the actual context-bloat fix).** When building context for a new question, pull prior bot answers via `coalesce(summary, message_text)` — the summary when present, full text otherwise. One expression, no branching; the null-vs-filled distinction carries all the logic. This is what keeps the context window bounded without losing the gist of prior answers.
+- **Provenance metadata (pairs with Phase 1/2, same write).** Add a `jsonb` column (e.g. `generation_metadata`) on bot-response rows capturing how the answer was derived: `{ model, context_doc_paths: [...], history_message_ids: [...], thread_id, token_counts?, latency_ms? }`. The bot doesn't *read* it to function; it's an observability/provenance record for diagnosing "why did it answer this way?" and the foundation for a future debug view / web-UI "explain this answer." Nearly free to capture at write-time, hard to reconstruct later — so capture now even before there's a UI to view it.
 
-### Register bot commands (`setMyCommands`)
-The bot's command menu/autocomplete is empty until commands are registered (via BotFather `/setcommands` or the Bot API `setMyCommands`). Typing `/ask` works regardless (the handler parses text), but registering populates the `/` menu. Do `ask` + `help` (+ `context` once built). The Bot API path is preferable long-term (the future onboarding UI automates it). *Surfaced during first onboarding — B1 in DEPLOYMENT didn't include it.*
+*Sequencing:* Phase 1 + the metadata column are the cheap foundation (one migration: add `summary` + `generation_metadata`; one code change: log the outgoing message). Then **watch real traffic** to see if follow-ups referencing prior answers are common before building Phase 2/3 — if they're rare, the summary machinery may not be worth it; if common, it's justified. Don't build the retrieval ahead of the evidence. *Why it matters:* better multi-turn answers + answer explainability, without unbounded context growth.
+
+### Typing indicator persists for long answers
+Telegram's `sendChatAction` ("typing…") **auto-clears after ~5 seconds** (Telegram-side behavior). When answer generation takes longer than that — common for the multi-query model path — the indicator vanishes before the answer arrives, leaving a few seconds of dead air. Fix: **re-send the typing action periodically** (every ~4s) while generating, and stop when the answer is sent (e.g. a keep-alive interval kicked off at generation start, cleared on send). Small, self-contained UX polish. *Surfaced in normal use — the gap is minor but not ideal.*
 
 ### Better user-facing error messages (low priority)
 When the async answer step throws, the bot replies with a generic "Sorry, something went wrong." That's good baseline UX (the graceful path works), but it's opaque. Low-priority improvement: optionally append `error.message` (or a friendlier mapped version) so the user/operator sees *what* failed (e.g. "the model is temporarily overloaded — try again" for a 529, vs. a config error). Its own small project; distinguish transient/retryable errors (429/529, `x-should-retry: true`) — which could even auto-retry — from real failures. *Surfaced when an Anthropic 529 "overloaded" (a transient outage) produced the generic message.*
@@ -56,22 +59,13 @@ When the async answer step throws, the bot replies with a generic "Sorry, someth
 **Partially resolved.** The hardcoded `claude-3-5-sonnet-20241022` (which was deprecated and returned a 404) is now read from `process.env.ANTHROPIC_MODEL` with a `'claude-sonnet-4-6'` fallback. So the platform-wide default is now config, not code.
 **Remaining:** per-entity model override — resolve as `entity.model || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6'`. Ties into the broader **per-tenant provider config** `{ provider, model, optional api_key_ref }` flagged for `PLANNING.md` (per-entity Anthropic keys / BYOK-vs-metered billing). *Why it matters:* different tenants may want different models/tiers; also the seam for per-tenant API keys.
 
-### B2 — Verify null-thread (General topic) doc resolution in `buildContext`
-`lib/capabilities.ts` (`buildContext`) matches topic docs with:
-```sql
-where m.entity_id = ${entityId}
-  and (m.telegram_thread_id is null or m.telegram_thread_id = ${threadIdStr})
-```
-When a question is asked in the **General topic**, `threadIdStr` is `null`. The `is null` branch still loads the entity-general docs correctly, so this is likely fine — but the `m.telegram_thread_id = ${null}` comparison won't match any topic-specific entries the way `is not distinct from` would. (The recent-messages query in the same function correctly uses `is not distinct from`.)
-- **Confirm** a General-topic question resolves the intended docs.
-- If General is ever meant to have its *own* topic-specific manifest entries (thread_id null but distinct from "general"), reconcile the semantics — currently "null thread" and "entity-general" are the same thing, which is probably the intended design, but worth an explicit check.
-
-*Why it matters:* correctness of context loading in the General topic. Low risk given the `is null` branch covers the common case, but worth a deliberate confirmation.
-
 ---
 
 ## Done
 
+- **`/context` command — shipped & runtime-verified.** Read-only context viewer: inline status summary (Entity/Group/Topic — `✓ N document(s)` / `none set` / `not enabled`) + full content as an attached `context.md` file (sidesteps the ~4096-char limit). `getContextManifest` mirrors `buildContext`'s resolution so it can't drift from `/ask`; `sendDocument` multipart helper added. Spec: `docs/specs/SPEC-context-command.md` (+ Addendum 1 for the status-based summary). Verified end-to-end (file downloads correctly from Telegram).
+- **`setMyCommands` — done.** Registered `/ask`, `/context`, `/help` in the bot command menu; now a documented step (DEPLOYMENT B7). Re-run when the command set changes (e.g. adding `/whoami`).
+- **B2 — null-thread (General topic) doc resolution — fixed.** Both `getContextManifest` and `buildContext` now use `(m.telegram_thread_id is null or m.telegram_thread_id is not distinct from ${threadIdStr})` — null-safe, makes #general resolve to entity-general docs only (no reliance on `= null`), and keeps the two functions in sync. (Was: `= ${threadIdStr}`, correct only by SQL null-comparison accident.)
 - Database security model (RLS + Vault + bootstrap functions + least-privilege role). See `SECURITY-PROPOSAL.md` (resolved).
 - `.env.example` corrected to connect as `bot_service` (not superuser); unused `SUPABASE_SERVICE_ROLE_KEY` removed.
 - **B0 — Table-privilege GRANTs for `bot_service` (resolved).** The migration `20260618000000_init_schema.sql` now grants `usage`/`select`/`insert`/`update`/`delete` on all tables, sequence usage, and `alter default privileges` for future tables to `bot_service` — appended after the `grant execute` lines in section 5. Verified: grants are at the end of the migration (after all `create table`), so they correctly cover all eight tables. A fresh `supabase db push` now produces a working role in one step. (Was: migration granted only `execute` on functions, so `bot_service` had no base table access and the app would fail with permission errors despite correct RLS.)
