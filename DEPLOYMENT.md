@@ -203,7 +203,7 @@ Platform setup is complete. Everything below is per-tenant.
 3. **Disable privacy mode — required:** BotFather → `/setprivacy` → select the bot → **Disable**. With privacy ON (the default), the bot only receives commands/mentions/replies, **not ordinary group messages** — so the recent-conversation feature silently degrades (the bot answers but can't reflect the live discussion). **Ordering gotcha:** privacy mode only applies to groups the bot joins *after* the setting is changed. So disable privacy **before** adding the bot to the group; if the bot is already in the group, **remove and re-add it**.
 4. Add the bot to the **Topics-enabled supergroup from B1a**, as a regular member (no admin needed). **Autocomplete gotcha:** a freshly-created bot often isn't cached yet, so it may not appear when you type `@` — **type the full username** explicitly.
 5. Record the bot's exact **username** (bare, no `@`) — it's stored in the entity row and used for mention detection (matching is case-insensitive).
-6. **Confirm privacy is off:** send a plain (non-command) message in a topic; after B4/B5 it should produce a `message_log` row. (Quick early check via B3's chat-id step: if a *plain, untagged* message shows up in `getUpdates`, privacy is correctly off — if you must tag the bot to get an update, privacy is still on.)
+6. **Confirm privacy is off:** send a plain (non-command) message in a topic; after B4/B5 it should produce a `message_log` row. (Quick early check via B4's chat-id step: if a *plain, untagged* message shows up in `getUpdates`, privacy is correctly off — if you must tag the bot to get an update, privacy is still on.)
 
 ## B2. Generate the per-tenant secrets
 
@@ -215,16 +215,29 @@ v1 stores **two** secrets for this tenant in Vault (B3):
 
 ## B3. Store the secrets in Supabase Vault
 
-Insert each secret into Vault and capture its returned `id` (UUID). **`vault.create_secret(secret_value, label)` — first arg is the ACTUAL secret value, second is a human-readable label.** Run in the SQL editor:
+> **Decide your entity `slug` now** (e.g. `hys`) — you'll use it in the secret **labels** here *and* in the entity row in B4. It must be lowercase, URL-safe, and stable (full rules in B4). Picking it now keeps the secret names self-documenting.
 
+Insert each secret into Vault and capture its returned `id` (UUID). The call signature is **`vault.create_secret(secret, secret_name)`** — `secret` = the real value, `secret_name` = the label. Run these in the SQL editor **one at a time**, capturing each returned UUID. **Replace BOTH placeholders in each statement** (the `<...>` markers) before running; nothing here is runnable as-is.
+
+**Secret 1 — the bot token** (the value from BotFather, B1b):
 ```sql
--- vault.create_secret( <THE ACTUAL SECRET VALUE> , <a label/name> )
---   arg 1 = the real secret (paste the actual token/secret here)
---   arg 2 = a name you choose, just for finding it later
--- Returns the UUID of the stored secret; capture each one.
-select vault.create_secret('123456:ABC-RealBotTokenFromBotFather', 'telegram_bot_token_hys');
-select vault.create_secret('a1b2c3...the-real-64char-hex-secret', 'telegram_webhook_secret_hys');
+select vault.create_secret(
+  '<PASTE_REAL_BOT_TOKEN>',          -- secret: the real token, e.g. 123456:ABC-...
+  'telegram_bot_token_<slug>'        -- secret_name: replace <slug>, e.g. telegram_bot_token_hys
+);
 ```
+
+**Secret 2 — the webhook secret** (the random hex from B2):
+```sql
+select vault.create_secret(
+  '<PASTE_REAL_WEBHOOK_SECRET>',     -- secret: the real 64-char hex from B2
+  'telegram_webhook_secret_<slug>'   -- secret_name: replace <slug>, e.g. telegram_webhook_secret_hys
+);
+```
+
+Capture both returned UUIDs — you'll reference them in B4 as `telegram_bot_token_id` and `telegram_webhook_secret_id` respectively.
+
+> **Why slug-based labels (not generic names like `WEBHOOK_SECRET`):** `vault.secrets.name` has a **partial unique index** (`secrets_name_idx` — unique where name is not null), so **names must be unique** — you literally can't create a second secret named `WEBHOOK_SECRET`. Per-entity labels (`..._hys`, `..._symres`) are unique by construction *and* self-documenting: `select name from vault.secrets` tells you which entity owns each secret at a glance. (Only the `id` UUID is referenced by the entity row; the label is purely for human lookup — but with multiple entities, a good label is what saves you.)
 
 > ⚠️ **DO NOT SWAP THE ARGUMENTS.** This is the single easiest mistake to make here, and it fails *silently* until the first `/ask`. If you put the **label** first and the **real secret** second, the bot's webhook auth will reject every message (the handler compares the stored *value* — which would be your label — against what Telegram sends), and worse, **your real secret ends up sitting in plaintext in the `name` column** (the `name` is NOT encrypted; only the value is). First arg = real secret, second arg = label. Always.
 
@@ -278,7 +291,12 @@ values ('THE_ENTITY_ID', -1001234567890, 'HYS Internal');
 
 > **Getting `telegram_chat_id` (and topic `message_thread_id`).** The chat id is a large negative number (supergroups look like `-1001234567890`). Two practical ways:
 > - **Easiest — a get-ID utility bot:** add a reputable ID bot (e.g. `@RawDataBot`, `@getidsbot`) to the group; it immediately replies with the chat id **and** the topic/thread ids. Read them, then **remove the bot**. (Don't do this in a group with sensitive live discussion; for a fresh onboarding group it's fine.) This also gives you the `message_thread_id` values for any per-topic manifest entries (B5).
-> - **Alternative — `getUpdates` (before the webhook is set):** send a message in the group, then `curl "https://api.telegram.org/bot<BOT_TOKEN>/getUpdates"` and read `message.chat.id`. ✅ **Verified:** works on **any** message the bot receives — with privacy off, even a plain *untagged* message suffices (no need to tag the bot; if you *do* have to tag it, privacy is still on). **Gotcha:** `getUpdates` only works while **no webhook is set** — once you run `setWebhook` (B6), it errors. So do this *before* B6 (which you are, here).
+> - **Alternative — `getUpdates` (before the webhook is set):** send a message in the group, then run (filling in your bot token):
+>   ```bash
+>   BOT_TOKEN="123456:ABC-RealBotTokenFromBotFather"
+>   curl "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates"
+>   ```
+>   and read `message.chat.id`. ✅ **Verified:** works on **any** message the bot receives — with privacy off, even a plain *untagged* message suffices (no need to tag the bot; if you *do* have to tag it, privacy is still on). **Gotcha:** `getUpdates` only works while **no webhook is set** — once you run `setWebhook` (B6), it errors. So do this *before* B6 (which you are, here).
 
 ## B5. Bootstrap content into the cache + manifest
 
@@ -320,9 +338,16 @@ values ('THE_ENTITY_ID', null, null, 'context/overview.md');
 Point Telegram at this tenant's slug-specific endpoint, with the per-tenant webhook secret (the *plaintext* value from B2, the same one stored in Vault):
 
 ```bash
-SECRET="THE_WEBHOOK_SECRET_PLAINTEXT"   # same value stored in Vault in B3
-curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \
-  --data-urlencode "url=https://api.kenntnis.ai/api/webhooks/telegram/hys" \
+# --- Fill in these three, then run the whole block ---
+BOT_TOKEN="123456:ABC-RealBotTokenFromBotFather"  # from BotFather (B1b)
+SLUG="<your_entity_slug>"                          # this entity's slug (B4), e.g. hys
+SECRET="YOUR_PLAINTEXT_WEBHOOK_SECRET"             # the plaintext webhook secret from B2
+                                                  # (same value stored in Vault as
+                                                  # telegram_webhook_secret_<slug> in B3;
+                                                  # mind trailing newlines)
+
+curl "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
+  --data-urlencode "url=https://api.kenntnis.ai/api/webhooks/telegram/${SLUG}" \
   --data-urlencode "secret_token=${SECRET}"
 ```
 
@@ -334,7 +359,9 @@ curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \
 Register the slash commands so they appear in Telegram's `/` autocomplete menu and the "Menu" button. (Functionally, typing `/ask` works even without this — the handler parses the text — but registering gives users discoverability.)
 
 ```bash
-curl "https://api.telegram.org/bot<BOT_TOKEN>/setMyCommands" \
+BOT_TOKEN="123456:ABC-RealBotTokenFromBotFather"  # from BotFather (B1b)
+
+curl "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands" \
   -H "Content-Type: application/json" \
   -d '{"commands":[
     {"command":"ask","description":"Ask a question grounded in the team docs"},
@@ -422,13 +449,18 @@ from entities
 where slug = 'hys';
 ```
 
-(`github_token_id` is null in v1.) Or list Vault secrets directly by the human-readable **name** you set in B3 (this is exactly why that name matters):
+(`github_token_id` is null in v1.) Or list Vault secrets directly by the human-readable **label** you set in B3 — with the slug-based scheme (`telegram_bot_token_<slug>`, `telegram_webhook_secret_<slug>`) you can find a specific entity's secrets by name:
 
 ```sql
+-- all of one entity's secrets (slug-based labels):
+select id, name, created_at from vault.secrets
+where name like '%\_hys' order by name;
+
+-- or everything, newest first:
 select id, name, created_at from vault.secrets order by created_at desc;
 ```
 
-Between these two, you can always recover a UUID — via the entity that references it, or by its name in `vault.secrets`.
+(Recall `name` is uniquely indexed, so each label maps to exactly one secret.) Between these two, you can always recover a UUID — via the entity that references it, or by its label in `vault.secrets`.
 
 ## Rotating a secret (in place — keeps the same UUID)
 
