@@ -1,6 +1,4 @@
-/**
- * Telegram Bot API Integration Service
- */
+import { BOT_COMMANDS, type BotCommand } from './commands';
 
 interface SendMessageOptions {
   replyToMessageId?: number;
@@ -183,4 +181,16 @@ export async function sendDocument(
   }
 
   return await res.json();
+}
+
+/**
+ * Registers the bot's command menu (setMyCommands). Pass a command list;
+ * defaults to the shared BOT_COMMANDS. setMyCommands is a full replace
+ * (not a merge), so this is idempotent and safe to re-run.
+ */
+export async function setMyCommands(
+  token: string,
+  commands: BotCommand[] = BOT_COMMANDS
+): Promise<any> {
+  return await callTelegramApi(token, 'setMyCommands', { commands });
 }
