@@ -280,6 +280,46 @@ export async function logMessage(input: {
 }
 
 /**
+ * Log the bot's own outgoing response to message_log (is_bot_response = true).
+ * summary stays null in Phase 1 (Phase 2 will populate it for long responses).
+ * generationMetadata captures provenance for debugging / future "explain this answer".
+ */
+export async function logBotResponse(input: {
+  entityId: string;
+  groupId: string;
+  telegramChatId: bigint | number | string;
+  telegramThreadId: bigint | number | string | null;
+  botUsername: string;              // stored in `username` so recaps read naturally
+  messageText: string;              // the full answer text the bot sent
+  summary?: string | null;          // Phase 2; pass null/undefined for now
+  generationMetadata?: Record<string, any> | null;
+}): Promise<void> {
+  const chatIdStr = input.telegramChatId.toString();
+  const threadIdStr =
+    input.telegramThreadId !== null && input.telegramThreadId !== undefined
+      ? input.telegramThreadId.toString()
+      : null;
+
+  await withTenantContext(input.entityId, async (tx) => {
+    await tx`
+      insert into message_log (
+        entity_id, group_id, telegram_chat_id, telegram_thread_id,
+        telegram_user_id, username, message_text,
+        is_command, is_bot_mention, is_bot_response,
+        summary, generation_metadata
+      ) values (
+        ${input.entityId}, ${input.groupId}, ${chatIdStr}, ${threadIdStr},
+        ${null}, ${input.botUsername}, ${input.messageText},
+        ${false}, ${false}, ${true},
+        ${input.summary ?? null},
+        ${input.generationMetadata ? tx.json(input.generationMetadata as any) : null}
+      )
+    `;
+  });
+}
+
+
+/**
  * Verify that active secret handles in entities resolve to valid tokens in Vault.
  */
 export async function checkVaultSecretsHealth(

@@ -7,6 +7,7 @@ import {
   answerQuestion,
   logMessage,
   getContextManifest,
+  logBotResponse,
 } from '@/lib/capabilities';
 import {
   setMessageReaction,
@@ -338,6 +339,26 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               replyToMessageId: message.message_id,
               parseMode: 'HTML',
             });
+
+            // Phase 1: record the bot's response so the conversation log is complete
+            // (enables /recap and future multi-turn context). Non-fatal if it fails.
+            try {
+              await logBotResponse({
+                entityId: entity.id,
+                groupId: group.id,
+                telegramChatId: message.chat.id,
+                telegramThreadId: threadId,
+                botUsername: entity.telegram_bot_username,
+                messageText: answerText,   // store the ORIGINAL answer, not the HTML-sanitized one
+                summary: null,             // Phase 2 will fill this for long answers
+                generationMetadata: {
+                  model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+                  thread_id: threadId,
+                },
+              });
+            } catch (err) {
+              console.error('Failed to log bot response:', err);
+            }
           } catch (err: any) {
             console.error('Error handling async answer workflow:', err);
             try {
