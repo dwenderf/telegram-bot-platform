@@ -194,7 +194,7 @@ Platform setup is complete. Everything below is per-tenant.
 
 > Why it's load-bearing: every message in a forum group carries a `message_thread_id` (except the *General* topic, which is null). The platform keys context resolution, message logging, and replies to that thread id (see `docs/PLANNING.md` §2.7 / §3.3). A non-forum group has no thread ids, so the per-topic model collapses.
 >
-> ⚠️ **Enable Topics FIRST — before adding the bot or recording the chat_id (it changes the chat_id).** Enabling Topics on a plain group **upgrades it to a supergroup, which migrates it to a NEW `telegram_chat_id`** (it gains the `-100…` supergroup prefix — e.g. `-5577480409` becomes `-1001234567890`). If you enable Topics *first* (as ordered here), you'll only ever capture the final `-100…` id in B4, and there's no problem. **But if Topics is enabled AFTER you've already inserted the `groups` row** (or after the bot was working), the stored `telegram_chat_id` is now **stale** — Telegram delivers messages under the new id, the handler finds no matching `groups` row, and the bot **silently stops responding** (it logs the message as an *untracked chat id*). Fix: update the row to the new id — `update groups set telegram_chat_id = <new -100… id> where id = '<group row id>';` (get the new id from the “untracked chat ID” log line, a get-ID bot, or `/whoami`). This footgun is the reason for the ordering.
+> ⚠️ **Enable Topics FIRST — before adding the bot or recording the chat_id (it changes the chat_id).** Enabling Topics on a plain group **upgrades it to a supergroup, which migrates it to a NEW `telegram_chat_id`** (it gains the `-100…` supergroup prefix — e.g. `-5577480409` becomes `-1001234567890`). If you enable Topics *first* (as ordered here), you'll only ever capture the final `-100…` id in B4, and there's no problem. **But if Topics is enabled AFTER you've already inserted the `groups` row** (or after the bot was working), the stored `telegram_chat_id` is now **stale** — Telegram delivers messages under the new id, the handler finds no matching `groups` row, and the bot **silently stops responding** (it logs the message as an *untracked chat id*). Fix: update the row to the new id — `update groups set telegram_chat_id = <new -100… id> where id = '<group row id>';` (get the new id the same way as B4: send a message and read the “untracked chat ID” Vercel log line). This footgun is the reason for the ordering.
 
 ### B1b. Create the bot (BotFather)
 
@@ -203,7 +203,7 @@ Platform setup is complete. Everything below is per-tenant.
 3. **Disable privacy mode — required:** BotFather → `/setprivacy` → select the bot → **Disable**. With privacy ON (the default), the bot only receives commands/mentions/replies, **not ordinary group messages** — so the recent-conversation feature silently degrades (the bot answers but can't reflect the live discussion). **Ordering gotcha:** privacy mode only applies to groups the bot joins *after* the setting is changed. So disable privacy **before** adding the bot to the group; if the bot is already in the group, **remove and re-add it**.
 4. Add the bot to the **Topics-enabled supergroup from B1a**, as a regular member (no admin needed). **Autocomplete gotcha:** a freshly-created bot often isn't cached yet, so it may not appear when you type `@` — **type the full username** explicitly.
 5. Record the bot's exact **username** (bare, no `@`) — it's stored in the entity row and used for mention detection (matching is case-insensitive).
-6. **Confirm privacy is off:** send a plain (non-command) message in a topic; after B4/B5 it should produce a `message_log` row. (Quick early check via B4's chat-id step: if a *plain, untagged* message shows up in `getUpdates`, privacy is correctly off — if you must tag the bot to get an update, privacy is still on.)
+6. **Confirm privacy is off:** after the webhook is set (B6), send a plain (non-command) message in a topic — it should produce a `message_log` row (and, before the group is tracked, an “untracked chat ID” log line). If only *commands/mentions* ever reach the bot and plain messages don't, privacy is still on — re-disable it and re-add the bot.
 
 ## B2. Generate the per-tenant secrets
 
@@ -298,14 +298,18 @@ values (
 );
 ```
 
-> **Getting `telegram_chat_id` (and topic `message_thread_id`).** The chat id is a large negative number (supergroups look like `-1001234567890`). Two practical ways:
-> - **Easiest — a get-ID utility bot:** add a reputable ID bot (e.g. `@RawDataBot`, `@getidsbot`) to the group; it immediately replies with the chat id **and** the topic/thread ids. Read them, then **remove the bot**. (Don't do this in a group with sensitive live discussion; for a fresh onboarding group it's fine.) This also gives you the `message_thread_id` values for any per-topic manifest entries (B5).
-> - **Alternative — `getUpdates` (before the webhook is set):** send a message in the group, then run (filling in your bot token):
->   ```bash
->   BOT_TOKEN="123456:ABC-RealBotTokenFromBotFather"
->   curl "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates"
->   ```
->   and read `message.chat.id`. ✅ **Verified:** works on **any** message the bot receives — with privacy off, even a plain *untagged* message suffices (no need to tag the bot; if you *do* have to tag it, privacy is still on). **Gotcha:** `getUpdates` only works while **no webhook is set** — once you run `setWebhook` (B6), it errors. So do this *before* B6 (which you are, here).
+> **Getting `telegram_chat_id` — the bot tells you (no third-party bot needed).** The chat id is a large negative number (supergroups look like `-1001234567890`). The reliable, safe way is to let *your own* bot report it via the platform's logs:
+>
+> 1. **Set this entity's webhook first** — run the **B6** `setWebhook` block (it uses `BOT_TOKEN` / `SLUG` / `SECRET`). Confirm it returns `"Webhook was set"`. (Yes, this means doing B6 *before* finishing B4's group insert — that's expected; the bot has to be receiving updates to report the chat id.)
+> 2. **Send any message in the group's General topic.** The bot receives it, finds no matching `groups` row yet, and **logs the chat id** in the **Vercel logs** as:
+>    ```
+>    Message received from untracked chat ID: -1001234567890
+>    ```
+> 3. **Copy that number** — it's your `telegram_chat_id` (it already includes the `-100…` sign/prefix; don't add anything). Use it in the group insert above, then send another message to confirm the bot now responds.
+>
+> *(For a topic's `message_thread_id` — needed only for per-topic manifest entries in B5 — the same applies once `/whoami` ships; until then, the General topic is null-threaded and entity-general docs are all most setups need.)*
+>
+> ⚠️ **Do NOT use third-party "get-ID" utility bots** (e.g. `@RawDataBot` and lookalikes). Adding one puts an **unknown third party inside your group, reading its messages**, and Telegram bot usernames are **dangerously confusable** — it's easy to add a malicious lookalike (e.g. `@raw_data_botbot` instead of `@RawDataBot`) that silently harvests the group. The log method above uses *only your own* bot and exposes nothing. There is no good reason to add an outside bot just to read a chat id.
 
 ## B5. Bootstrap content into the cache + manifest
 
@@ -319,7 +323,7 @@ The bot answers from `doc_cache`. In v1 you push content **directly** into it (n
 insert into doc_cache (entity_id, doc_path, content, git_sha)
 values (
   'THE_ENTITY_ID',
-  'context/overview.md',
+  'entity-context-overview',
   $doc$
 # Hudson Yards Studios — Overview
 
@@ -335,10 +339,10 @@ do update set content = excluded.content, synced_at = now();
 --    (Run once — manifest_entries has no unique constraint on these columns, so
 --    re-running would create duplicates.)
 insert into manifest_entries (entity_id, group_id, telegram_thread_id, doc_path)
-values ('THE_ENTITY_ID', null, null, 'context/overview.md');
+values ('THE_ENTITY_ID', null, null, 'entity-context-overview');
 ```
 
-- **`doc_path`** is just a logical identifier in v1 (no GitHub path to match) — keep it consistent between the `doc_cache` row and the `manifest_entries` row so the manifest resolves to the cached doc.
+- **`doc_path` is just a logical identifier in v1** — despite the name, it is *not* a file path (the GitHub-era path meaning is gone). Use a short, **descriptive label** for what the doc is (e.g. `entity-context-overview`, `pricing-faq`, `board-onboarding`) rather than a path-like `context/overview.md` — the descriptive form is clearer in `/context` listings and in the cache. The only hard rule: it must **match exactly** between the `doc_cache` row and its `manifest_entries` row (they join on `entity_id` + `doc_path`), and be unique per entity (it's the cache's key).
 - **Per-topic docs (optional):** for a topic-specific doc, push another `doc_cache` row and add a `manifest_entries` row with `telegram_thread_id = <the topic's message_thread_id>`. *(v1 resolution uses entity-general + per-topic; per-**group** scoping via `group_id` is not yet built — see `PLANNING.md` §9.)*
 - **Re-seeding / editing content** later: just re-run the `doc_cache` upsert with new content (the `on conflict` updates it). This is the manual content-management path until a UI or a sync-source is added.
 
@@ -529,7 +533,7 @@ select vault.update_secret(
 - **A6 sanity check** — `set role` fails in the SQL editor; use the `information_schema.role_table_grants` query.
 - **`vault.create_secret(secret, name)`** — works as written; returns the UUID (B3).
 - **Entity insert as `postgres`** — succeeds via SQL editor (bypasses RLS `WITH CHECK`); confirms entity creation is a privileged admin action (B4).
-- **`getUpdates` for chat_id** — works on any received message; a plain untagged message suffices (also confirms privacy off); fails once a webhook is set (B4).
+- **Chat-id retrieval method** — settled on the bot's own "untracked chat ID" Vercel log line (send a message → read the log) as the single safe method. `getUpdates` was used early but only works *before* a webhook is set, so it doesn't fit the normal flow (webhook is set per entity); third-party get-ID bots were rejected as dangerous (confusable usernames; an outside bot reading the group). See B4.
 - **GitHub dropped from v1 path** — content is direct-to-`doc_cache`; GitHub-sync code retained as a future optional sync-source (see `PLANNING.md`).
 - **RLS policies were RESTRICTIVE → fixed to PERMISSIVE** (migration `20260621000000_fix_rls_permissive.sql`). Restrictive-only = deny-all for `bot_service`; surfaced as "Tenant config mismatch" 404 on the first real request. Invisible in the SQL editor (postgres bypasses RLS). See A5 note.
 - **Vault secret value/name SWAP** — on first onboarding all three secrets were inserted with `create_secret` args reversed (real value in `name`, placeholder in value). Caused 401 webhook-auth failures + plaintext secrets in `name`. B3 rewritten with explicit arg-order warning + immediate verify query.
