@@ -1,7 +1,19 @@
 // Re-registers the bot command menu (setMyCommands) for EVERY entity's bot.
-// Run manually with an admin DB connection:
-//   ADMIN_DATABASE_URL=postgres://postgres:...@host:5432/postgres \
-//     npx tsx scripts/sync-commands.ts
+//
+// Run manually with an admin DB connection. You MUST `export` the variable so
+// the npx child process inherits it (a bare assignment is only visible to the
+// current shell, not to the script — you'll get "ADMIN_DATABASE_URL is required"):
+//
+//   export ADMIN_DATABASE_URL="postgresql://postgres.<ref>:<password>@aws-<n>-<region>.pooler.supabase.com:6543/postgres"
+//   npx tsx scripts/sync-commands.ts
+//
+// IMPORTANT — use the Supavisor POOLER host (aws-<n>-<region>.pooler.supabase.com),
+// NOT the direct host (db.<ref>.supabase.co). The direct host fails locally with
+// `getaddrinfo ENOTFOUND db.<ref>.supabase.co` (same issue as Vercel — see
+// DEPLOYMENT.md A7). Username is the privileged role with the project-ref suffix
+// (e.g. postgres.<ref>); the script reads ALL tenants' bot tokens, so it needs the
+// privileged `postgres` role, not `bot_service`. prepare:false (set below) makes
+// either pooler port work (6543 transaction or 5432 session).
 //
 // Holds elevated DB privilege (reads all tenants' bot tokens). Run locally,
 // never deploy. setMyCommands is a full replace, so this is idempotent.
@@ -16,7 +28,10 @@ async function main() {
     process.exit(1);
   }
 
-  const sql = postgres(adminUrl, { max: 4, idle_timeout: 10, connect_timeout: 10 });
+  // prepare: false so this works on the Supavisor transaction pooler (6543) too,
+  // not only the session pooler (5432). (Session mode supports prepared statements;
+  // transaction mode does not. Setting it false is safe on both.)
+  const sql = postgres(adminUrl, { max: 4, idle_timeout: 10, connect_timeout: 10, prepare: false });
 
   try {
     // 1. All entities with a bot token reference.
