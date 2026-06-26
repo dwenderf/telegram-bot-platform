@@ -108,8 +108,12 @@ Apply `supabase/migrations/20260618000000_init_schema.sql`. This creates all tab
    |---|---|---|
    | `DATABASE_URL` | the **transaction-mode pooler** string (see below) | **Must be the `bot_service` role**, not `postgres`. Mark **Sensitive** in Vercel. |
    | `ANTHROPIC_API_KEY` | your Anthropic key | Mark Sensitive. |
-   | `ANTHROPIC_MODEL` | a current model id, e.g. `claude-sonnet-4-6` | Platform-wide default model. **Not** sensitive. Code reads `process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6'`. Using an env var (not a hardcoded id) means a deprecated model can be swapped without a code change — see the B7 note on the model-404 failure. (Per-entity model override is future — `PLANNING.md` §9.) |
+   | `ANTHROPIC_MODEL` | a current model id, e.g. `claude-sonnet-4-6` | Platform-wide default model. **Not** sensitive. |
    | `GITHUB_WEBHOOK_SECRET` | a strong shared secret | **Only needed if the optional GitHub sync-source is enabled** (not used in v1). If used: global HMAC secret, generate via password manager, save it. Mark Sensitive. |
+   | `NEXT_PUBLIC_SUPABASE_URL` | your Supabase project URL | Public, required for client-side Auth & DB queries. |
+   | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | your Supabase anon public key | Public, required for client-side Auth & DB queries. |
+   | `NEXT_PUBLIC_APP_NAME` | the brand-config product name | Custom branding, defaults to `'Agent Platform'`. |
+   | `NEXT_PUBLIC_APP_URL` | the base URL of the Next.js app | Base URL for magic-link redirect endpoints, e.g. `https://api.yourdomain.com`. |
 
    > **⚠️ `DATABASE_URL` MUST be the transaction-mode POOLER string, not the direct connection.** This bit us on the first deploy: the **direct** connection host (`db.PROJECT_REF.supabase.co:5432`) is **unreachable from Vercel** — the function crashes with `getaddrinfo ENOTFOUND db.PROJECT_REF.supabase.co` (the direct host is IPv6-oriented and serverless can't resolve/reach it). Use the **Supavisor transaction pooler** instead. Get it from **Supabase → Project Settings → Database → Connection string → "Connection pooling" / Transaction mode**. It differs from the direct string in three ways:
    > - **Host:** `aws-<n>-<region>.pooler.supabase.com` (e.g. `aws-1-us-west-2.pooler.supabase.com`), not `db.<ref>.supabase.co`
@@ -128,7 +132,7 @@ Apply `supabase/migrations/20260618000000_init_schema.sql`. This creates all tab
    > ```
    > (Alternative: use the **session** pooler on port 5432, which supports prepared statements — but transaction mode + `prepare: false` is the right choice for serverless. Confirm `prepare: false` is set before relying on the deploy.)
 
-   > `[VERIFY]` These three are the only env vars the current code reads (`lib/supabase.ts` → `DATABASE_URL`; `lib/anthropic.ts` → `ANTHROPIC_API_KEY`; the GitHub sync route → `GITHUB_WEBHOOK_SECRET`). The unused `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` are intentionally NOT used (see `.env.example`). Confirm no other env var has been introduced before relying on this list.
+   > `[VERIFY]` The current code reads `DATABASE_URL`, `ANTHROPIC_API_KEY`, `GITHUB_WEBHOOK_SECRET`, and the client-exposed variables `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_APP_NAME`, and `NEXT_PUBLIC_APP_URL` for brand management and OTP redirects. Confirm no other env vars are expected.
 
 3. Deploy. Note the production URL Vercel assigns.
 

@@ -7,7 +7,7 @@ if (!apiKey) {
 }
 
 const anthropic = new Anthropic({
-  apiKey: apiKey || '',
+  apiKey: apiKey || 'dummy-key',
 });
 
 interface CallModelInput {
@@ -16,11 +16,19 @@ interface CallModelInput {
   model: string;
 }
 
+let mockCallModel: ((input: CallModelInput) => Promise<{ text: string }>) | null = null;
+export function setMockCallModel(mock: typeof mockCallModel) {
+  mockCallModel = mock;
+}
+
 /**
  * Interface to communicate with the Anthropic Messages API.
  * Leverages Prompt Caching (Beta) for static system prompts to minimize latency and token costs.
  */
 export async function callModel(input: CallModelInput): Promise<{ text: string }> {
+  if (mockCallModel) {
+    return await mockCallModel(input);
+  }
   try {
     // Call the Anthropic Messages API
     // We pass the system prompt as a structured block to enable ephemeral prompt caching
