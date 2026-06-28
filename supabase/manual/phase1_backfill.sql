@@ -3,8 +3,9 @@
 
 -- 1. Owner backfill: Set the operator/owner profile ID for existing entities.
 -- REPLACE '<OWNER_PROFILE_UUID>' with the actual profile ID of the signed-up operator.
+-- REPLACE the slugs in the WHERE clause with the actual slugs of the entities that should be owned by the operator.
 update public.entities set owner_profile_id = '<OWNER_PROFILE_UUID>'
-  where slug in ('hys','symres','theata') and owner_profile_id is null;
+  where slug in ('<slug1>', '<slug2>') and owner_profile_id is null;
 
 -- 2. Bots & bot_entities mirror of current per-entity bots (1 bot per entity in v1)
 with new_bots as (

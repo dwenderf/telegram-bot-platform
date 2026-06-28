@@ -111,7 +111,7 @@ Apply `supabase/migrations/20260618000000_init_schema.sql`. This creates all tab
    | `ANTHROPIC_MODEL` | a current model id, e.g. `claude-sonnet-4-6` | Platform-wide default model. **Not** sensitive. |
    | `GITHUB_WEBHOOK_SECRET` | a strong shared secret | **Only needed if the optional GitHub sync-source is enabled** (not used in v1). If used: global HMAC secret, generate via password manager, save it. Mark Sensitive. |
    | `NEXT_PUBLIC_SUPABASE_URL` | your Supabase project URL | Public, required for client-side Auth & DB queries. |
-   | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | your Supabase anon public key | Public, required for client-side Auth & DB queries. |
+   | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | your Supabase publishable public key | Public, required for client-side Auth & DB queries. `key sb_publishable_...` |
    | `NEXT_PUBLIC_APP_NAME` | the brand-config product name | Custom branding, defaults to `'Agent Platform'`. |
    | `NEXT_PUBLIC_APP_URL` | the base URL of the Next.js app | Base URL for magic-link redirect endpoints, e.g. `https://api.yourdomain.com`. |
 
@@ -132,7 +132,7 @@ Apply `supabase/migrations/20260618000000_init_schema.sql`. This creates all tab
    > ```
    > (Alternative: use the **session** pooler on port 5432, which supports prepared statements — but transaction mode + `prepare: false` is the right choice for serverless. Confirm `prepare: false` is set before relying on the deploy.)
 
-   > `[VERIFY]` The current code reads `DATABASE_URL`, `ANTHROPIC_API_KEY`, `GITHUB_WEBHOOK_SECRET`, and the client-exposed variables `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_APP_NAME`, and `NEXT_PUBLIC_APP_URL` for brand management and OTP redirects. Confirm no other env vars are expected.
+   > `[VERIFY]` The current code reads `DATABASE_URL`, `ANTHROPIC_API_KEY`, `GITHUB_WEBHOOK_SECRET`, and the client-exposed variables `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `NEXT_PUBLIC_APP_NAME`, and `NEXT_PUBLIC_APP_URL` for brand management and OTP redirects. Confirm no other env vars are expected.
 
 3. Deploy. Note the production URL Vercel assigns.
 
