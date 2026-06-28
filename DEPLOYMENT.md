@@ -24,7 +24,9 @@ Accounts/assets you need before starting:
 - **Vercel** account (hosts the Next.js app).
 - **GitHub** account (hosts per-tenant content repos; also where this platform repo lives).
 - **Anthropic** API key (the model provider).
-- **Domain:** `kenntnis.ai` (already registered). The platform will run on a subdomain, e.g. `api.kenntnis.ai`.
+- **Domains:** two, reflecting the infra-vs-product split:
+  - **`kenntnis.ai`** (holding company / infrastructure) — the bot/webhook **runtime** runs on a subdomain, `api.kenntnis.ai`; preview deployments use `*.preview.kenntnis.ai`.
+  - **`leguan.ai`** (product) — the human-facing **management dashboard** runs on `app.leguan.ai`. Product branding is env-driven (`NEXT_PUBLIC_APP_NAME` / `NEXT_PUBLIC_APP_URL`), so this domain is config, not hardcoded — see A7 and A8b.
 
 Local tooling:
 - Node.js (version per `package.json` / Next 16 requirements).
@@ -113,7 +115,7 @@ Apply `supabase/migrations/20260618000000_init_schema.sql`. This creates all tab
    | `NEXT_PUBLIC_SUPABASE_URL` | your Supabase project URL | Public, required for client-side Auth & DB queries. |
    | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | your Supabase publishable public key | Public, required for client-side Auth & DB queries. `key sb_publishable_...` |
    | `NEXT_PUBLIC_APP_NAME` | the brand-config product name | Custom branding, defaults to `'Agent Platform'`. |
-   | `NEXT_PUBLIC_APP_URL` | the base URL of the Next.js app | Base URL for magic-link redirect endpoints, e.g. `https://api.yourdomain.com`. |
+   | `NEXT_PUBLIC_APP_URL` | base URL of the **management dashboard** (per-environment) | Drives the magic-link redirect (`emailRedirectTo`). Prod = product domain (e.g. `https://app.leguan.ai`); local = `http://localhost:3000`; preview = leave **unset** (falls back to `window.location.origin`). **Not** the `api.` runtime domain. Full config in A8b. |
 
    > **⚠️ `DATABASE_URL` MUST be the transaction-mode POOLER string, not the direct connection.** This bit us on the first deploy: the **direct** connection host (`db.PROJECT_REF.supabase.co:5432`) is **unreachable from Vercel** — the function crashes with `getaddrinfo ENOTFOUND db.PROJECT_REF.supabase.co` (the direct host is IPv6-oriented and serverless can't resolve/reach it). Use the **Supavisor transaction pooler** instead. Get it from **Supabase → Project Settings → Database → Connection string → "Connection pooling" / Transaction mode**. It differs from the direct string in three ways:
    > - **Host:** `aws-<n>-<region>.pooler.supabase.com` (e.g. `aws-1-us-west-2.pooler.supabase.com`), not `db.<ref>.supabase.co`
@@ -143,6 +145,30 @@ Apply `supabase/migrations/20260618000000_init_schema.sql`. This creates all tab
 3. Wait for DNS propagation + Vercel's TLS cert to issue. Confirm `https://api.kenntnis.ai` resolves to the app.
 
 > All tenant webhook URLs will be built on this domain (`https://api.kenntnis.ai/api/webhooks/...`), so they stay stable and owned by you regardless of the underlying Vercel deployment.
+
+> The **management dashboard** runs on a *separate* domain (the product domain) — see **A8b** for that domain plus the Supabase Auth URL configuration it requires.
+
+## A8b. Management dashboard domain + Supabase Auth URLs
+
+The **management dashboard** (the `/manage` web shell from the Phase 1 management plane; see `docs/specs/SPEC-phase-1-management-plane.md`) is human-facing, so it lives on the **product** domain, separate from the `api.` runtime. This split keeps infrastructure on `kenntnis.ai` and the product surface on `leguan.ai`.
+
+**Vercel domains** (all on the same Vercel project):
+- **Production dashboard:** add **`app.leguan.ai`** (CNAME per Vercel's instructions), and set `NEXT_PUBLIC_APP_URL=https://app.leguan.ai` in Vercel's **Production** environment.
+- **Preview:** previews are ephemeral — leave `NEXT_PUBLIC_APP_URL` **unset** for the Preview environment so the login page falls back to `window.location.origin` (each preview uses its own URL). Optionally add a wildcard `*.preview.kenntnis.ai` for stable preview hostnames; otherwise the default `*.vercel.app` URLs work.
+- **Local:** `.env.local` sets `NEXT_PUBLIC_APP_URL=http://localhost:3000`.
+
+**Supabase → Authentication → URL Configuration** — this is the config that makes magic-link auth work; getting it wrong produces a silent "failed to fetch" on send, or a bounced redirect after the click:
+
+- **Site URL** — a **single** origin, **no wildcard** (the field rejects them). Set it to the canonical production dashboard: `https://app.leguan.ai`. It is only the *default* redirect when a flow doesn't specify one (and the email-template variable); the app always passes an explicit `emailRedirectTo`, so it's mostly a fallback.
+- **Redirect URLs** — the **allowlist** of permitted post-auth redirects; **wildcards allowed**, and this is what actually governs each environment. Include every environment, each with a `/**` suffix (so `/manage/dashboard` and future paths match):
+  - `http://localhost:3000/**` — local dev (must be present, or local auth breaks)
+  - `https://app.leguan.ai/**` — production
+  - `https://*.preview.kenntnis.ai/**` — custom preview wildcard (if used)
+  - `https://*-<your-vercel-scope>.vercel.app/**` — default Vercel preview URLs
+
+> **Site URL vs Redirect URLs — the distinction that bites:** setting the Site URL to production does **not** disable localhost. Localhost keeps working because it's in the *Redirect URLs* allowlist and the app targets it explicitly via `NEXT_PUBLIC_APP_URL`. Site URL = single default; Redirect URLs = the multi-entry, wildcard-capable allowlist that governs what's permitted. Put localhost in **Redirect URLs**, not Site URL.
+
+> **Auth key reminder:** the browser client uses the **publishable** key (`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `sb_publishable_...`) — Supabase's current replacement for the legacy `anon` JWT key. It is public by design (browser-exposed), resolves to the same `anon` Postgres role, and is enforced entirely by RLS — so it is **not** marked Sensitive in Vercel. The `service_role` key is never used in this app (see the A7 note). `ADMIN_DATABASE_URL` (the `postgres` superuser string used by the local test/sync scripts) is **never** set in Vercel.
 
 ## A9. Platform smoke test (curl — verified)
 
@@ -537,6 +563,11 @@ select vault.update_secret(
 ---
 
 # Appendix — Quick reference
+
+**Domains:**
+- Bot/webhook **runtime** (infra): `api.kenntnis.ai` — and `*.preview.kenntnis.ai` for previews.
+- Management **dashboard** (product): `app.leguan.ai` — `NEXT_PUBLIC_APP_URL` per environment; preview falls back to deployment origin.
+- Supabase Auth: Site URL = `https://app.leguan.ai` (single, no wildcard); Redirect URLs allowlist holds localhost + prod + preview globs, each with `/**`. See A8b.
 
 **Webhook URLs:**
 - Telegram (per-tenant): `https://api.kenntnis.ai/api/webhooks/telegram/{slug}`
