@@ -194,3 +194,17 @@ export async function setMyCommands(
 ): Promise<any> {
   return await callTelegramApi(token, 'setMyCommands', { commands });
 }
+
+/**
+ * Gets a chat member's status (used to check if a Telegram user is a group admin/creator).
+ */
+export async function getChatMember(
+  token: string,
+  chatId: bigint | number,
+  userId: bigint | number
+): Promise<any> {
+  return await callTelegramApi(token, 'getChatMember', {
+    chat_id: chatId.toString(),
+    user_id: Number(userId),
+  });
+}

@@ -9,6 +9,7 @@ import {
   getContextManifest,
   logBotResponse,
   recapConversation,
+  consumeLinkToken,
 } from '@/lib/capabilities';
 import {
   setMessageReaction,
@@ -16,6 +17,7 @@ import {
   sendMessage,
   sendDocument,
   sanitizeForTelegramHtml,
+  getChatMember,
 } from '@/lib/telegram';
 
 const DEFAULT_RECAP = 20;
@@ -101,6 +103,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const isHelpCommand = text.startsWith('/help');
     const isContextCommand = text.startsWith('/context');
     const isWhoamiCommand = text.startsWith('/whoami');
+    const isAuthCommand = text.startsWith('/auth');
     const isRecapCommand = text.startsWith('/recap');
     const isMention = text.includes(`@${botUsername}`);
 
@@ -113,6 +116,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     } else if (isContextCommand) {
       isCommand = true;
     } else if (isWhoamiCommand) {
+      isCommand = true;
+    } else if (isAuthCommand) {
       isCommand = true;
     } else if (isRecapCommand) {
       isCommand = true;
@@ -191,6 +196,115 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       );
 
       return NextResponse.json({ ok: true, msg: 'whoami sent' });
+    }
+
+    // 5b_2. Respond to /auth — link a Telegram group to this entity.
+    // MUST run before the untracked-group bail-out since the group is not yet tracked.
+    if (isAuthCommand) {
+      try {
+        await setMessageReaction(entity.telegram_bot_token, message.chat.id, message.message_id, '👀');
+      } catch (err) {
+        console.error('Failed to set eyes reaction:', err);
+      }
+
+      const authArg = text.replace(/^\/auth(?:@[a-zA-Z0-9_]+)?\s*/i, '').trim();
+
+      if (!authArg) {
+        // Bare /auth
+        const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+        let appHost = appUrl;
+        try {
+          appHost = new URL(appUrl).host;
+        } catch {}
+
+        const infoMsg = `To link this group, generate a one-time code in the dashboard, then send <code>/auth &lt;code&gt;</code> here. Get a code at ${escapeHtml(appHost)} — only a group admin can complete linking.`;
+        await sendMessage(entity.telegram_bot_token, message.chat.id, infoMsg, {
+          threadId,
+          replyToMessageId: message.message_id,
+          parseMode: 'HTML',
+        });
+        return NextResponse.json({ ok: true, msg: 'Auth info sent' });
+      }
+
+      // Group-admin gate
+      try {
+        const member = await getChatMember(entity.telegram_bot_token, message.chat.id, message.from.id);
+        const isAdmin = member?.result?.status === 'administrator' || member?.result?.status === 'creator';
+        if (!isAdmin) {
+          await sendMessage(
+            entity.telegram_bot_token,
+            message.chat.id,
+            `Only a group admin can link this group.`,
+            { threadId, replyToMessageId: message.message_id }
+          );
+          return NextResponse.json({ ok: true, msg: 'Not admin' });
+        }
+      } catch (err) {
+        console.error('Failed admin check:', err);
+        await sendMessage(
+          entity.telegram_bot_token,
+          message.chat.id,
+          `⚠️ <i>Failed to verify administrator status. Please try again.</i>`,
+          { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
+        );
+        return NextResponse.json({ ok: true, msg: 'Admin check failed' });
+      }
+
+      // Forum check
+      const isForum = !!message.chat.is_forum;
+      if (!isForum) {
+        await sendMessage(
+          entity.telegram_bot_token,
+          message.chat.id,
+          `⚠️ <i>This bot requires a forum group with Topics enabled to operate. Please enable Topics in this group's settings.</i>`,
+          { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
+        );
+        return NextResponse.json({ ok: true, msg: 'Not forum' });
+      }
+
+      // Consume the link token
+      try {
+        const { displayName } = await consumeLinkToken({
+          code: authArg,
+          expectedEntityId: entity.id,
+          chatId: message.chat.id,
+          tgUserId: message.from.id,
+          chatTitle: message.chat.title || 'Telegram Group',
+          isForum,
+        });
+
+        await sendMessage(
+          entity.telegram_bot_token,
+          message.chat.id,
+          `✅ This group is now linked to <b>${escapeHtml(displayName)}</b>.`,
+          { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
+        );
+      } catch (err: any) {
+        console.error('Link token consumption failed:', err);
+        const errMsg = err.message || '';
+        let replyMsg = `⚠️ <i>Something went wrong while processing the linking request.</i>`;
+
+        if (errMsg.includes('invalid_code') || errMsg.includes('expired')) {
+          replyMsg = `That link code is invalid or expired. Generate a new one in the dashboard.`;
+        } else if (errMsg.includes('already_consumed')) {
+          replyMsg = `That code was already used. Generate a new one.`;
+        } else if (errMsg.includes('entity_mismatch')) {
+          replyMsg = `That code is for a different workspace's bot.`;
+        } else if (errMsg.includes('chat_bound_elsewhere')) {
+          replyMsg = `This group is already linked to another workspace. Unlink it first.`;
+        } else if (errMsg.includes('not_forum')) {
+          replyMsg = `⚠️ <i>This bot requires a forum group with Topics enabled to operate. Please enable Topics in this group's settings.</i>`;
+        }
+
+        await sendMessage(
+          entity.telegram_bot_token,
+          message.chat.id,
+          replyMsg,
+          { threadId, replyToMessageId: message.message_id }
+        );
+      }
+
+      return NextResponse.json({ ok: true, msg: 'Auth command processed' });
     }
 
     // 5c. Resolve group check for non-whoami requests — bail early if untracked

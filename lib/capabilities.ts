@@ -465,3 +465,37 @@ export async function getContextManifest(
     return { entityDocs, topicDocs };
   });
 }
+
+/**
+ * Validate and consume a group linking token and bind the chat to the entity.
+ * Executed under the bot_service role connection.
+ */
+export async function consumeLinkToken(input: {
+  code: string;
+  expectedEntityId: string | null;
+  chatId: bigint | number | string;
+  tgUserId: bigint | number | string;
+  chatTitle: string;
+  isForum: boolean;
+}): Promise<{ entityId: string; displayName: string }> {
+  const result = await sql<{ entity_id: string; display_name: string }[]>`
+    select entity_id, display_name
+    from public.consume_link_token(
+      ${input.code},
+      ${input.expectedEntityId},
+      ${input.chatId.toString()},
+      ${input.tgUserId.toString()},
+      ${input.chatTitle},
+      ${input.isForum}
+    )
+  `;
+  
+  if (result.length === 0) {
+    throw new Error('invalid_code');
+  }
+
+  return {
+    entityId: result[0].entity_id,
+    displayName: result[0].display_name,
+  };
+}

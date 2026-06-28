@@ -32,7 +32,7 @@ export default function EntityDetails({ params }: { params: Promise<{ entityId: 
   const [entity, setEntity] = useState<Entity | null>(null);
   const [authorizations, setAuthorizations] = useState<Authorization[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'settings' | 'team'>('settings');
+  const [activeTab, setActiveTab] = useState<'settings' | 'team' | 'groups'>('settings');
 
   // Form states
   const [displayName, setDisplayName] = useState('');
@@ -46,6 +46,15 @@ export default function EntityDetails({ params }: { params: Promise<{ entityId: 
   const [inviteError, setInviteError] = useState('');
   const [inviteSuccess, setInviteSuccess] = useState('');
   const [inviteLoading, setInviteLoading] = useState(false);
+
+  // Group linking states
+  const [linkCode, setLinkCode] = useState<string | null>(null);
+  const [linkLoading, setLinkLoading] = useState(false);
+  const [linkError, setLinkError] = useState('');
+  const [linkSuccess, setLinkSuccess] = useState('');
+  const [copied, setCopied] = useState(false);
+  const [timeLeft, setTimeLeft] = useState<number | null>(null);
+  const [linkedGroups, setLinkedGroups] = useState<any[]>([]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -85,6 +94,25 @@ export default function EntityDetails({ params }: { params: Promise<{ entityId: 
 
       if (authsErr) throw authsErr;
       setAuthorizations(authsData || []);
+
+      // 3. Fetch Linked Groups (gated for owner/admin in RPC)
+      const { data: { session } } = await supabase.auth.getSession();
+      const sessionUser = session?.user;
+      const isOwnerUser = entityData.owner_profile_id === sessionUser?.id;
+      const isAdminUser = isOwnerUser || (authsData || []).some(
+        (a: any) => a.profile_id === sessionUser?.id && a.role === 'admin' && a.status === 'active'
+      );
+
+      if (isAdminUser) {
+        const { data: groupsData, error: groupsErr } = await supabase.rpc('list_entity_groups', {
+          p_entity: entityId
+        });
+        if (!groupsErr) {
+          setLinkedGroups(groupsData || []);
+        } else {
+          console.warn('Failed to load linked groups:', groupsErr);
+        }
+      }
     } catch (err: any) {
       setEntityError(err.message || 'Failed to load entity.');
     } finally {
@@ -171,6 +199,54 @@ export default function EntityDetails({ params }: { params: Promise<{ entityId: 
     }
   };
 
+  const handleGenerateCode = async () => {
+    if (!entity) return;
+    setLinkLoading(true);
+    setLinkError('');
+    setLinkSuccess('');
+    try {
+      const { data, error } = await supabase.rpc('mint_link_token', {
+        p_entity: entity.id,
+      });
+
+      if (error) throw error;
+
+      setLinkCode(data);
+      setCopied(false);
+      setTimeLeft(600); // 10 minutes in seconds
+    } catch (err: any) {
+      setLinkError(err.message || 'Failed to generate link code.');
+    } finally {
+      setLinkLoading(false);
+    }
+  };
+
+  const handleCopyCommand = async () => {
+    if (!linkCode) return;
+    try {
+      await navigator.clipboard.writeText(`/auth ${linkCode}`);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      // Graceful fallback: do not set copied and do not show toast
+    }
+  };
+
+  useEffect(() => {
+    if (timeLeft === null || timeLeft <= 0) return;
+    const timer = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(timer);
+          setLinkCode(null);
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [timeLeft]);
+
   if (loading) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', backgroundColor: '#080c14', color: '#94a3b8' }}>
@@ -180,6 +256,7 @@ export default function EntityDetails({ params }: { params: Promise<{ entityId: 
   }
 
   const isOwner = entity?.owner_profile_id === user?.id;
+  const isAdmin = isOwner || authorizations.some((auth) => auth.profile_id === user?.id && auth.role === 'admin' && auth.status === 'active');
 
   return (
     <div className="manage-container">
@@ -221,6 +298,14 @@ export default function EntityDetails({ params }: { params: Promise<{ entityId: 
             >
               Team & Access
             </button>
+            {isAdmin && (
+              <button
+                onClick={() => setActiveTab('groups')}
+                className={`tab-btn ${activeTab === 'groups' ? 'active' : ''}`}
+              >
+                Linked Groups
+              </button>
+            )}
           </div>
 
           {activeTab === 'settings' && (
@@ -353,6 +438,98 @@ export default function EntityDetails({ params }: { params: Promise<{ entityId: 
                                 </button>
                               </td>
                             )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'groups' && isAdmin && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+              <div className="card">
+                <h2>Connect a Telegram Group</h2>
+                {linkError && <div className="alert alert-error">{linkError}</div>}
+                {linkSuccess && <div className="alert alert-success">{linkSuccess}</div>}
+                
+                <p style={{ margin: 0, fontSize: '0.95rem', color: 'var(--text-muted)' }}>
+                  To link a Telegram group, generate a one-time link command below and execute it as a group administrator.
+                </p>
+
+                {!linkCode ? (
+                  <button
+                    onClick={handleGenerateCode}
+                    className="btn btn-primary"
+                    disabled={linkLoading}
+                    style={{ marginTop: '1rem', alignSelf: 'flex-start' }}
+                  >
+                    {linkLoading ? 'Generating...' : 'Generate Link Command'}
+                  </button>
+                ) : (
+                  <div style={{ marginTop: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                    <div 
+                      onClick={handleCopyCommand}
+                      style={{
+                        background: 'rgba(255, 255, 255, 0.05)',
+                        border: '1px dashed rgba(255, 255, 255, 0.15)',
+                        borderRadius: '6px',
+                        padding: '1.25rem',
+                        cursor: 'pointer',
+                        position: 'relative',
+                        transition: 'background 0.2s',
+                      }}
+                      className="code-copy-box"
+                    >
+                      <div style={{ fontFamily: 'monospace', fontSize: '1.1rem', color: '#60a5fa' }}>
+                        /auth {linkCode}
+                      </div>
+                      <span style={{
+                        position: 'absolute',
+                        right: '12px',
+                        top: '12px',
+                        fontSize: '0.8rem',
+                        color: 'var(--text-muted)',
+                      }}>
+                        {copied ? 'Copied!' : 'Click to Copy'}
+                      </span>
+                    </div>
+                    <p style={{ margin: 0, fontSize: '0.85rem' }}>
+                      💡 <strong>Instructions:</strong> Click the box above to copy the command, go to your Telegram group, and paste it. 
+                      This code is valid for 10 minutes and can only be used once. Only group administrators can run this command.
+                    </p>
+                    {timeLeft !== null && (
+                      <div style={{ fontSize: '0.85rem', color: '#fbbf24' }}>
+                        Expires in: {Math.floor(timeLeft / 60)}m {timeLeft % 60}s
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Linked Groups List */}
+              <div className="card">
+                <h2>Linked Telegram Groups</h2>
+                {linkedGroups.length === 0 ? (
+                  <p style={{ margin: 0 }}>No groups linked yet.</p>
+                ) : (
+                  <div className="table-container">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Group Name</th>
+                          <th>Telegram Chat ID</th>
+                          <th>Linked Date</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {linkedGroups.map((g) => (
+                          <tr key={g.id}>
+                            <td><strong>{g.display_name}</strong></td>
+                            <td><code>{g.telegram_chat_id}</code></td>
+                            <td>{new Date(g.created_at).toLocaleString()}</td>
                           </tr>
                         ))}
                       </tbody>
