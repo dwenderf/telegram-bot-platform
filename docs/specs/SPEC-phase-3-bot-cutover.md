@@ -256,9 +256,40 @@ telegram columns harmlessly. It's modified only in Phase 3.1, in lockstep with t
 - **Per-bot routing is native** (slug + secret per bot) — N bots = N rows + N `setWebhook`s, no routing
   rewrite. @-mention is the natural addressing mechanism in a multi-bot group (it's inherently
   bot-specific), which is why the trigger-model change is forward-compatible.
-- **OPEN QUESTION (logged, not decided):** command namespace in a multi-bot/bot-store world — separate
-  bots with overlapping commands (Telegram `@bot` disambiguation), vs. one verb + bot-as-argument, vs.
-  one platform bot dispatching to registered backends. Decide when the bot store is actually scoped.
+
+### 8.1 Bot-store direction (leaning answer to the former "open question")
+
+The command-namespace question is now **resolved in direction** (still not built):
+
+- **The platform owns the command namespace.** Submitters do **not** bring a running Telegram bot or
+  register commands. The marketplace unit is a **reviewed capability bundle**: skills/functionality +
+  a model source (known provider or self-hosted/open-source endpoint) + a credential. The platform
+  reviews/approves it, owns the runtime, and owns how it's surfaced. This keeps the trust boundary,
+  quality bar, and usage/billing visibility with the platform (App-Store-style curation, not
+  sideloading).
+- **Invocation model = @mention-the-expert.** Users address a capability the way they'd address a
+  person: `@KenntnisResearch` gets research questions, `@KenntnisAdversary` gets push-back. More
+  natural than `--flags`. Mechanically, **each addressable expert is its own Telegram bot identity =
+  its own `bots` row** (own slug, token, secret, webhook) — which is exactly the per-bot routing this
+  phase builds. So "experts you @mention" = N `bots` rows, resolved by the same per-bot webhook path.
+  No new dispatch architecture; the bot store is "add rows."
+- **Two actors, two onboarding paths — only one must be frictionless.** The *consumer* (wants a bot
+  answering questions in their group) stays fully **self-service**: add the platform bot, `/auth` to
+  link, done — no BotFather, no manual step. That is what Phases 1–3 protect and must never regress.
+  The *submitter* (a trusted entity offering an expert bot) is a different actor: low-volume,
+  high-trust, curated — so **manual creation of each expert bot is appropriate, not a bottleneck**. The
+  human gate is a *feature* (quality + trust + credential-custody review), and it sits entirely on the
+  submitter side, at a volume the operator can personally handle for a closed group of trusted
+  providers. The consumer never touches it. (Far-future-only escape hatch, if submissions ever outgrow
+  manual effort: the single-bot-with-capability-selection model. Not foreseeable; not designed for
+  now.)
+- **DEFERRED problem — third-party credential custody:** the "submit your model source + access key"
+  step makes the platform a **custodian of submitters' credentials** and a maker of spend decisions on
+  their accounts. Solvable (same Vault + scoped-access pattern as `get_current_bot_secret`), but it
+  raises real obligations (bearer-secret breach exposes *their* accounts; runaway spend on *their*
+  dime; custody edges toward the KYC/liability triggers in the monetization notes). **No present
+  forcing function** — you hold your own key for your own bots today; this only arrives with external
+  submitters. Park it until the bot store is actually scoped.
 
 ---
 
