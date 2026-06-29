@@ -41,3 +41,16 @@ export async function withTenantContext<T>(
     return await callback(tx);
   })) as T;
 }
+
+/**
+ * Executes database operations inside a transaction with RLS scoped to a specific platform bot.
+ */
+export async function withBotContext<T>(
+  botId: string,
+  callback: (tx: postgres.TransactionSql) => Promise<T>
+): Promise<T> {
+  return (await sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.current_bot_id', ${botId}, true)`;
+    return await callback(tx);
+  })) as T;
+}

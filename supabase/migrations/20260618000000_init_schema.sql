@@ -138,7 +138,7 @@ alter table processed_updates force row level security;
 
 -- -------------------------------------------------------------
 -- 4. Invariant: Allowed RLS-Bypass Functions (SECURITY DEFINER)
--- The database has exactly THREE security definer bypass functions.
+-- The database has exactly FOUR security definer bypass functions (including get_current_bot_secret).
 -- No other RLS-bypassing functions should be added without security review.
 -- -------------------------------------------------------------
 

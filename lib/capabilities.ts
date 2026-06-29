@@ -198,6 +198,8 @@ export async function answerQuestion(input: {
   groupId: string;
   threadId: bigint | number | string | null;
   question: string;
+  model?: string | null;
+  persona?: string | null;
 }): Promise<{ answerText: string }> {
   // Load the project documentation and recent transcript context
   const { contextDocs, recentConversation } = await buildContext(
@@ -206,16 +208,20 @@ export async function answerQuestion(input: {
     input.threadId
   );
 
-  const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+  const model = input.model || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
 
-  const systemPrompt = `You are a helpful AI assistant for the team. Answer the user's question accurately based ONLY on the provided context documents. If the answer cannot be determined from the context, politely state that you do not know.
+  const defaultPersona = `You are a helpful AI assistant for the team. Answer the user's question accurately based ONLY on the provided context documents. If the answer cannot be determined from the context, politely state that you do not know.
 
 OUTPUT FORMAT RULES (CRITICAL):
 - Use Telegram-HTML format.
 - ONLY use the following whitelisted HTML tags: <b>, <i>, <u>, <s>, <code>, <pre>, <a href="...">.
 - Use bullet points like "• " for lists.
 - Avoid unsupported tags like <p>, <ul>, <li>, <h1>, <div>, etc.
-- Escape literal <, >, and & (e.g. use &amp; for ampersands, &lt; for less-than, &gt; for greater-than).
+- Escape literal <, >, and & (e.g. use &amp; for ampersands, &lt; for less-than, &gt; for greater-than).`;
+
+  const basePersona = input.persona || defaultPersona;
+
+  const systemPrompt = `${basePersona}
 
 PROJECT CONTEXT:
 ${contextDocs}
@@ -482,7 +488,7 @@ export async function consumeLinkToken(input: {
     select entity_id, display_name
     from public.consume_link_token(
       ${input.code},
-      ${input.expectedEntityId},
+      null,
       ${input.chatId.toString()},
       ${input.tgUserId.toString()},
       ${input.chatTitle},
@@ -498,4 +504,24 @@ export async function consumeLinkToken(input: {
     entityId: result[0].entity_id,
     displayName: result[0].display_name,
   };
+}
+
+/**
+ * Resolves a bot public slug to its database ID.
+ */
+export async function resolveBotIdBySlug(slug: string): Promise<string | null> {
+  const rows = await sql<{ resolve_bot_id_by_slug: string }[]>`
+    select public.resolve_bot_id_by_slug(${slug})
+  `;
+  return rows[0]?.resolve_bot_id_by_slug || null;
+}
+
+/**
+ * Resolves a Telegram chat ID to its bound entity ID (context-less resolver).
+ */
+export async function resolveEntityIdByChat(chatId: bigint | number | string): Promise<string | null> {
+  const rows = await sql<{ resolve_entity_id_by_chat: string }[]>`
+    select public.resolve_entity_id_by_chat(${chatId.toString()})
+  `;
+  return rows[0]?.resolve_entity_id_by_chat || null;
 }

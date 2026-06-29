@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { waitUntil } from '@vercel/functions';
-import { sql, withTenantContext } from '@/lib/supabase';
+import { sql, withTenantContext, withBotContext } from '@/lib/supabase';
 import {
-  resolveTenant,
   resolveUser,
   answerQuestion,
   logMessage,
@@ -10,6 +9,8 @@ import {
   logBotResponse,
   recapConversation,
   consumeLinkToken,
+  resolveBotIdBySlug,
+  resolveEntityIdByChat,
 } from '@/lib/capabilities';
 import {
   setMessageReaction,
@@ -25,87 +26,63 @@ const MAX_RECAP = 100;
 
 interface RouteParams {
   params: Promise<{
-    entitySlug: string;
+    botSlug: string;
   }>;
 }
 
 export async function POST(req: NextRequest, { params }: RouteParams) {
   try {
-    const { entitySlug } = await params;
-    
-    // 1. Bootstrap RLS: Resolve the entity ID from public slug
-    // This calls the SECURITY DEFINER function to bypass RLS and get the non-secret UUID.
-    const bootstrapResult = await sql<any[]>`
-      select resolve_entity_id_by_slug(${entitySlug}) as id
-    `;
+    const { botSlug } = await params;
 
-    const entityId = bootstrapResult[0]?.id;
-    if (!entityId) {
-      console.warn(`Webhook triggered for unknown tenant slug: ${entitySlug}`);
-      return NextResponse.json({ error: 'Tenant not found' }, { status: 404 });
+    // 1. Resolve bot ID from slug
+    const botId = await resolveBotIdBySlug(botSlug);
+    if (!botId) {
+      console.warn(`Webhook triggered for unknown bot slug: ${botSlug}`);
+      return NextResponse.json({ error: 'Bot not found' }, { status: 404 });
     }
 
-    const entity = await withTenantContext(entityId, async (tx) => {
+    // 2. Fetch bot info using get_bot_config SECURITY DEFINER resolver
+    const bot = await withBotContext(botId, async (tx) => {
       const rows = await tx<any[]>`
-        select e.id, e.slug, e.telegram_bot_username, e.excluded_thread_ids,
-               get_current_entity_secret(e.telegram_bot_token_id) as telegram_bot_token,
-               get_current_entity_secret(e.telegram_webhook_secret_id) as telegram_webhook_secret
-        from entities e
-        where e.id = ${entityId}
-        limit 1
+        select * from public.get_bot_config(${botId})
       `;
       return rows[0];
     });
 
-    if (!entity) {
-      return NextResponse.json({ error: 'Tenant config mismatch' }, { status: 404 });
+    if (!bot) {
+      return NextResponse.json({ error: 'Bot config mismatch' }, { status: 404 });
     }
 
-    // 3. Auth: Verify the x-telegram-bot-api-secret-token header
+    if (bot.status === 'retired') {
+      console.warn(`Webhook triggered for retired bot: ${botSlug}`);
+      return NextResponse.json({ error: 'Bot retired' }, { status: 404 });
+    }
+
+    // 3. Webhook-secret gate (runs before entity resolution) (S1)
     const incomingSecret = req.headers.get('x-telegram-bot-api-secret-token');
-    if (incomingSecret !== entity.telegram_webhook_secret) {
-      console.warn(`Unauthorized webhook attempt on tenant: ${entitySlug}`);
+    if (incomingSecret !== bot.telegram_webhook_secret) {
+      console.warn(`Unauthorized webhook attempt on bot: ${botSlug}`);
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const update = await req.json();
 
-    // 4. Deduplicate: Idempotency check using update_id
-    const updateId = update.update_id;
-    if (updateId) {
-      try {
-        await withTenantContext(entity.id, async (tx) => {
-          await tx`
-            insert into processed_updates (update_id, entity_id)
-            values (${updateId}, ${entity.id})
-          `;
-        });
-      } catch (err) {
-        // Unique constraint violation means we already processed this update
-        console.info(`Duplicate update ignored (Idempotency): ${updateId}`);
-        return NextResponse.json({ ok: true, msg: 'Duplicate ignored' });
-      }
-    }
-
     const message = update.message;
     if (!message || !message.chat || !message.text) {
-      // Return 200 OK for unhandled update types
       return NextResponse.json({ ok: true });
     }
 
-    // 5. Resolve group and verify it matches the current entity
     const text = message.text.trim();
-    const botUsername = entity.telegram_bot_username;
+    const botUsername = bot.telegram_username;
     const threadId = message.message_thread_id !== undefined ? message.message_thread_id : null;
 
     // Determine intents
-    const isAskCommand = text.startsWith('/ask');
     const isHelpCommand = text.startsWith('/help');
     const isContextCommand = text.startsWith('/context');
     const isWhoamiCommand = text.startsWith('/whoami');
     const isAuthCommand = text.startsWith('/auth');
     const isRecapCommand = text.startsWith('/recap');
-    const isMention = text.includes(`@${botUsername}`);
+    const isMention = botUsername ? text.includes(`@${botUsername}`) : false;
 
     let isCommand = false;
     let isBotMention = false;
@@ -121,36 +98,72 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       isCommand = true;
     } else if (isRecapCommand) {
       isCommand = true;
-    } else if (isAskCommand) {
-      isCommand = true;
-      question = text.replace(/^\/ask(?:@[a-zA-Z0-9_]+)?\s*/i, '');
     } else if (isMention) {
       isBotMention = true;
       question = text.replace(new RegExp(`@${botUsername}\\s*`, 'gi'), '');
     }
 
-    // 5. Resolve group context if registered
-    const tenantInfo = await resolveTenant(entity.id, message.chat.id);
-    const group = tenantInfo && tenantInfo.entity.id === entity.id ? tenantInfo.group : null;
+    // 4. Resolve entity ID from the group chat ID (S2)
+    // Note: The bot_entities table maps authorized entities to a bot (a deliberate future-authorization seam
+    // for bot-store subscription gating). In Phase 3, we resolve the tenant context purely via chat_id -> groups -> entity_id.
+    const entityId = await resolveEntityIdByChat(message.chat.id);
 
-    // 5b. Respond to /whoami — echo the raw Telegram ids + resolved entity/group when known.
-    // MUST run before the untracked-group bail-out so it works during onboarding.
+    // 4b. Early Deduplication for bound chats (Idempotency)
+    const updateId = update.update_id;
+    if (updateId && entityId) {
+      try {
+        await withTenantContext(entityId, async (tx) => {
+          await tx`
+            insert into processed_updates (update_id, entity_id)
+            values (${updateId}, ${entityId})
+          `;
+        });
+      } catch (err) {
+        // Unique constraint violation means we already processed this update
+        console.info(`Duplicate update ignored (Idempotency): ${updateId}`);
+        return NextResponse.json({ ok: true, msg: 'Duplicate ignored' });
+      }
+    }
+
+    // 5. Unbound Commands: /whoami & /auth (S3)
     if (isWhoamiCommand) {
       const chatId = message.chat.id;
       const fromId = message.from?.id ?? null;
       const fromUsername = message.from?.username ?? null;
 
-      const entityLabel = entity?.slug ?? 'unregistered';
-      const groupLabel = group?.display_name ?? 'unregistered';
+      let entityLabel = 'unregistered';
+      let groupLabel = 'unregistered';
+      let whoamiExcluded = false;
 
-      // Compute exclusion status so /whoami can report WHY the bot is silent here.
-      // (This is the diagnostic value of /whoami running above the excluded gate.)
-      const whoamiExcluded =
-        threadId !== null &&
-        entity.excluded_thread_ids &&
-        entity.excluded_thread_ids.some(
-          (id: any) => id.toString() === threadId.toString()
-        );
+      if (entityId) {
+        // Resolve entity info to report details in whoami
+        const entityInfo = await withTenantContext(entityId, async (tx) => {
+          const rows = await tx<any[]>`
+            select slug, excluded_thread_ids from public.entities where id = ${entityId}
+          `;
+          return rows[0];
+        });
+        if (entityInfo) {
+          entityLabel = entityInfo.slug || 'unregistered';
+          whoamiExcluded =
+            threadId !== null &&
+            entityInfo.excluded_thread_ids &&
+            entityInfo.excluded_thread_ids.some(
+              (id: any) => id.toString() === threadId.toString()
+            );
+
+          // Find group display name
+          const groupRow = await withTenantContext(entityId, async (tx) => {
+            const rows = await tx<any[]>`
+              select display_name from public.groups where telegram_chat_id = ${chatId.toString()}
+            `;
+            return rows[0];
+          });
+          if (groupRow) {
+            groupLabel = groupRow.display_name || 'unregistered';
+          }
+        }
+      }
 
       const lines = [
         '<b>🪪 whoami</b>',
@@ -165,15 +178,19 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         `<b>Topic status:</b> ${whoamiExcluded ? '⛔️ <i>excluded (bot does not operate here)</i>' : '✅ <i>active</i>'}`,
       ];
 
-      // Log the command execution only if group is registered
-      if (group) {
-        const isExcluded = whoamiExcluded;
-
-        if (!isExcluded) {
-          try {
+      if (entityId && groupLabel !== 'unregistered' && !whoamiExcluded) {
+        try {
+          // Log whoami only if bound and active
+          const resolvedGroup = await withTenantContext(entityId, async (tx) => {
+            const rows = await tx<any[]>`
+              select id from public.groups where telegram_chat_id = ${chatId.toString()} limit 1
+            `;
+            return rows[0];
+          });
+          if (resolvedGroup) {
             await logMessage({
-              entityId: entity.id,
-              groupId: group.id,
+              entityId,
+              groupId: resolvedGroup.id,
               telegramChatId: chatId,
               telegramThreadId: threadId,
               telegramUserId: fromId,
@@ -182,14 +199,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               isCommand: true,
               isBotMention: false,
             });
-          } catch (err) {
-            console.error('Failed to log whoami command:', err);
           }
+        } catch (err) {
+          console.error('Failed to log whoami:', err);
         }
       }
 
       await sendMessage(
-        entity.telegram_bot_token,
+        bot.telegram_bot_token,
         chatId,
         lines.join('\n'),
         { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
@@ -198,11 +215,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ ok: true, msg: 'whoami sent' });
     }
 
-    // 5b_2. Respond to /auth — link a Telegram group to this entity.
-    // MUST run before the untracked-group bail-out since the group is not yet tracked.
     if (isAuthCommand) {
       try {
-        await setMessageReaction(entity.telegram_bot_token, message.chat.id, message.message_id, '👀');
+        await setMessageReaction(bot.telegram_bot_token, message.chat.id, message.message_id, '👀');
       } catch (err) {
         console.error('Failed to set eyes reaction:', err);
       }
@@ -210,7 +225,6 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const authArg = text.replace(/^\/auth(?:@[a-zA-Z0-9_]+)?\s*/i, '').trim();
 
       if (!authArg) {
-        // Bare /auth
         const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
         let appHost = appUrl;
         try {
@@ -218,7 +232,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         } catch {}
 
         const infoMsg = `To link this group, generate a one-time code in the dashboard, then send <code>/auth &lt;code&gt;</code> here. Get a code at ${escapeHtml(appHost)} — only a group admin can complete linking.`;
-        await sendMessage(entity.telegram_bot_token, message.chat.id, infoMsg, {
+        await sendMessage(bot.telegram_bot_token, message.chat.id, infoMsg, {
           threadId,
           replyToMessageId: message.message_id,
           parseMode: 'HTML',
@@ -226,13 +240,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         return NextResponse.json({ ok: true, msg: 'Auth info sent' });
       }
 
-      // Group-admin gate
+      // Group admin check
       try {
-        const member = await getChatMember(entity.telegram_bot_token, message.chat.id, message.from.id);
+        const member = await getChatMember(bot.telegram_bot_token, message.chat.id, message.from.id);
         const isAdmin = member?.result?.status === 'administrator' || member?.result?.status === 'creator';
         if (!isAdmin) {
           await sendMessage(
-            entity.telegram_bot_token,
+            bot.telegram_bot_token,
             message.chat.id,
             `Only a group admin can link this group.`,
             { threadId, replyToMessageId: message.message_id }
@@ -242,7 +256,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       } catch (err) {
         console.error('Failed admin check:', err);
         await sendMessage(
-          entity.telegram_bot_token,
+          bot.telegram_bot_token,
           message.chat.id,
           `⚠️ <i>Failed to verify administrator status. Please try again.</i>`,
           { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
@@ -254,7 +268,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const isForum = !!message.chat.is_forum;
       if (!isForum) {
         await sendMessage(
-          entity.telegram_bot_token,
+          bot.telegram_bot_token,
           message.chat.id,
           `⚠️ <i>This bot requires a forum group with Topics enabled to operate. Please enable Topics in this group's settings.</i>`,
           { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
@@ -262,11 +276,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         return NextResponse.json({ ok: true, msg: 'Not forum' });
       }
 
-      // Consume the link token
+      // Consume the link token (null expected entity in Phase 3)
       try {
         const { displayName } = await consumeLinkToken({
           code: authArg,
-          expectedEntityId: entity.id,
+          expectedEntityId: null,
           chatId: message.chat.id,
           tgUserId: message.from.id,
           chatTitle: message.chat.title || 'Telegram Group',
@@ -274,7 +288,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         });
 
         await sendMessage(
-          entity.telegram_bot_token,
+          bot.telegram_bot_token,
           message.chat.id,
           `✅ This group is now linked to <b>${escapeHtml(displayName)}</b>.`,
           { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
@@ -288,8 +302,6 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           replyMsg = `That link code is invalid or expired. Generate a new one in the dashboard.`;
         } else if (errMsg.includes('already_consumed')) {
           replyMsg = `That code was already used. Generate a new one.`;
-        } else if (errMsg.includes('entity_mismatch')) {
-          replyMsg = `That code is for a different workspace's bot.`;
         } else if (errMsg.includes('chat_bound_elsewhere')) {
           replyMsg = `This group is already linked to another workspace. Unlink it first.`;
         } else if (errMsg.includes('not_forum')) {
@@ -297,7 +309,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         }
 
         await sendMessage(
-          entity.telegram_bot_token,
+          bot.telegram_bot_token,
           message.chat.id,
           replyMsg,
           { threadId, replyToMessageId: message.message_id }
@@ -307,22 +319,38 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ ok: true, msg: 'Auth command processed' });
     }
 
-    // 5c. Resolve group check for non-whoami requests — bail early if untracked
-    if (!group) {
+    // 6. Bail if group is not bound
+    if (!entityId) {
       console.info(`Message received from untracked chat ID: ${message.chat.id}`);
       return NextResponse.json({ ok: true, msg: 'Untracked group' });
     }
 
-    // 5d. Excluded-thread gate (single choke point for ALL commands below).
-    // If this thread is in the entity's excluded_thread_ids, the bot stays out:
-    //   - it does NOT log the message, and
-    //   - it does NOT dispatch any command (/help, /context, /recap, /ask, @mention).
-    // It declines ONCE, but only when actually addressed (a command or @mention),
-    // so it stays silent on ordinary chatter in the excluded thread.
-    // (/whoami is intentionally handled in 5b, ABOVE this gate, so it still works
-    // here as a diagnostic — including reporting that this thread is excluded.)
-    // Placing the gate here means every current AND future command inherits this
-    // behavior automatically — no per-command exclusion check to maintain.
+    // 7. Load Entity & Group Context
+    const entity = await withTenantContext(entityId, async (tx) => {
+      const rows = await tx<any[]>`
+        select id, slug, display_name, excluded_thread_ids
+        from public.entities
+        where id = ${entityId}
+        limit 1
+      `;
+      return rows[0];
+    });
+
+    const group = await withTenantContext(entityId, async (tx) => {
+      const rows = await tx<any[]>`
+        select id, display_name
+        from public.groups
+        where telegram_chat_id = ${message.chat.id.toString()}
+        limit 1
+      `;
+      return rows[0];
+    });
+
+    if (!entity || !group) {
+      return NextResponse.json({ error: 'Tenant config mismatch' }, { status: 404 });
+    }
+
+    // 8. Excluded-thread check
     const isExcluded =
       threadId !== null &&
       entity.excluded_thread_ids &&
@@ -332,24 +360,23 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     if (isExcluded) {
       if (isCommand || isBotMention) {
-        // Addressed directly → decline once so the user isn't left wondering.
         try {
           await sendMessage(
-            entity.telegram_bot_token,
+            bot.telegram_bot_token,
             message.chat.id,
             `⛔️ <i>I'm not configured to operate in this topic.</i>`,
             { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
           );
         } catch (err) {
-          console.error('Failed to send excluded-thread notice:', err);
+          console.error('Failed to send excluded thread notice:', err);
         }
       }
-      // Either way: do not log, do not dispatch any command.
       return NextResponse.json({ ok: true, msg: 'Excluded thread' });
     }
 
-    // 6. Log the message (we're past the excluded-thread gate, so the thread is
-    //    not excluded — log unconditionally).
+    // 9. processed_updates idempotency (handled early in step 4b for bound chats)
+
+    // 10. Log incoming message
     await logMessage({
       entityId: entity.id,
       groupId: group.id,
@@ -362,57 +389,52 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       isBotMention,
     });
 
-    // 7. Respond to /help
+    // 11. Respond to /help
     if (isHelpCommand) {
       waitUntil(
         (async () => {
-          const helpText = `<b>Telegram Bot Platform v1 Help</b>\n\n` +
-            `• Use <code>/ask &lt;question&gt;</code> to ask me a question grounded in the repository context.\n` +
+          const helpText = `<b>Telegram Bot Platform Help</b>\n\n` +
             `• Use <code>/context</code> to see what documentation I'm answering from in this topic.\n` +
             `• Use <code>/recap [N]</code> to summarize the last N messages here (default 20).\n` +
             `• Use <code>/whoami</code> to show this chat's ids (useful for setup/diagnostics).\n` +
             `• Mention me <code>@${botUsername} &lt;question&gt;</code> inside a topic to ask a question.\n` +
             `• Use <code>/help</code> to see this message.`;
 
-          await sendMessage(entity.telegram_bot_token, message.chat.id, helpText, {
+          await sendMessage(bot.telegram_bot_token, message.chat.id, helpText, {
             threadId,
             replyToMessageId: message.message_id,
             parseMode: 'HTML',
           });
         })()
       );
-
       return NextResponse.json({ ok: true, msg: 'Help sent' });
     }
 
-    // 7b. Respond to /context — show what the bot answers from here (read-only).
+    // 12. Respond to /context
     if (isContextCommand) {
       waitUntil(
         (async () => {
           try {
             const { entityDocs, topicDocs } = await getContextManifest(entity.id, threadId);
-
             const totalDocs = entityDocs.length + topicDocs.length;
 
-            // (1) Inline summary — status-based metrics (ADDENDUM 1)
             const entityText = entityDocs.length > 0
               ? `✓ ${entityDocs.length} document${entityDocs.length === 1 ? '' : 's'}`
               : `<i>— none set</i>`;
-            
             const groupText = `<i>— not enabled in this version</i>`;
-            
             const topicText = topicDocs.length > 0
               ? `✓ ${topicDocs.length} document${topicDocs.length === 1 ? '' : 's'}`
               : `<i>— none set</i>`;
 
-            const summaryLines: string[] = [];
-            summaryLines.push(`<b>📚 Context for this topic</b>`);
-            summaryLines.push('');
-            summaryLines.push(`<b>Entity:</b> ${entityText}`);
-            summaryLines.push(`<b>Group:</b> ${groupText}`);
-            summaryLines.push(`<b>Topic:</b> ${topicText}`);
-            summaryLines.push('');
-            
+            const summaryLines = [
+              `<b>📚 Context for this topic</b>`,
+              '',
+              `<b>Entity:</b> ${entityText}`,
+              `<b>Group:</b> ${groupText}`,
+              `<b>Topic:</b> ${topicText}`,
+              '',
+            ];
+
             if (totalDocs > 0) {
               summaryLines.push(`📎 Full text attached below ↓`);
             } else {
@@ -420,17 +442,16 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             }
 
             await sendMessage(
-              entity.telegram_bot_token,
+              bot.telegram_bot_token,
               message.chat.id,
               summaryLines.join('\n'),
               { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
             );
 
-            // (2) Full content as an attached markdown file — only if there's content.
             if (totalDocs > 0) {
               const docMarkdown = buildContextDocument(entityDocs, topicDocs);
               await sendDocument(
-                entity.telegram_bot_token,
+                bot.telegram_bot_token,
                 message.chat.id,
                 'context.md',
                 docMarkdown,
@@ -441,28 +462,25 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             console.error('Error handling /context:', err);
             try {
               await sendMessage(
-                entity.telegram_bot_token,
+                bot.telegram_bot_token,
                 message.chat.id,
                 `⚠️ <i>Sorry, couldn't retrieve the context right now.</i>`,
                 { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
               );
             } catch (sendErr) {
-              console.error('Failed to send /context error fallback:', sendErr);
+              console.error('Failed fallback:', sendErr);
             }
           }
         })()
       );
-
       return NextResponse.json({ ok: true, msg: 'Context sent' });
     }
 
-    // 7c. Respond to /recap — summarize the last N messages in this thread (model call).
+    // 13. Respond to /recap
     if (isRecapCommand) {
-      // Parse requested limit
       const recapArg = text.replace(/^\/recap(?:@[a-zA-Z0-9_]+)?\s*/i, '').trim();
-
       let requested = parseInt(recapArg, 10);
-      let note = ''; // optional user-facing note about clamping/fallback
+      let note = '';
 
       if (!Number.isInteger(requested) || requested <= 0) {
         requested = DEFAULT_RECAP;
@@ -474,19 +492,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         note = `Recapping the last ${MAX_RECAP} messages (max).`;
       }
 
-      // 1. Immediate ack (same as /ask): 👀 + typing
       try {
-        await setMessageReaction(entity.telegram_bot_token, message.chat.id, message.message_id, '👀');
+        await setMessageReaction(bot.telegram_bot_token, message.chat.id, message.message_id, '👀');
+        await sendChatAction(bot.telegram_bot_token, message.chat.id, 'typing', threadId);
       } catch (err) {
-        console.error('Failed to set eyes reaction:', err);
-      }
-      try {
-        await sendChatAction(entity.telegram_bot_token, message.chat.id, 'typing', threadId);
-      } catch (err) {
-        console.error('Failed to send typing action:', err);
+        console.error('Reaction/Action error:', err);
       }
 
-      // 2. Slow part async
       waitUntil(
         (async () => {
           try {
@@ -501,24 +513,23 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             const sanitized = sanitizeForTelegramHtml(recapText);
 
             await sendMessage(
-              entity.telegram_bot_token,
+              bot.telegram_bot_token,
               message.chat.id,
               prefix + sanitized,
               { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
             );
 
-            // Phase 1 storage: a recap IS a bot response → log it (so the log stays complete).
             try {
               await logBotResponse({
                 entityId: entity.id,
                 groupId: group.id,
                 telegramChatId: message.chat.id,
                 telegramThreadId: threadId,
-                botUsername: entity.telegram_bot_username,
+                botUsername: bot.telegram_username,
                 messageText: recapText,
                 summary: null,
                 generationMetadata: {
-                  model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+                  model: bot.model || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
                   thread_id: threadId,
                   kind: 'recap',
                   recap_limit: requested,
@@ -531,37 +542,29 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             console.error('Error handling /recap:', err);
             try {
               await sendMessage(
-                entity.telegram_bot_token,
+                bot.telegram_bot_token,
                 message.chat.id,
                 `⚠️ <i>Sorry, couldn't build a recap right now.</i>`,
                 { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
               );
             } catch (sendErr) {
-              console.error('Failed to send /recap error fallback:', sendErr);
+              console.error('Failed fallback:', sendErr);
             }
           }
         })()
       );
-
       return NextResponse.json({ ok: true, msg: 'Recap processing' });
     }
 
-    // 8. Respond to /ask or Mentions
-    if (isAskCommand || isBotMention) {
-      // Immediate acknowledgment:
+    // 14. Respond to Mentions (answer Question) (S4)
+    if (isBotMention) {
       try {
-        await setMessageReaction(entity.telegram_bot_token, message.chat.id, message.message_id, '👀');
+        await setMessageReaction(bot.telegram_bot_token, message.chat.id, message.message_id, '👀');
+        await sendChatAction(bot.telegram_bot_token, message.chat.id, 'typing', threadId);
       } catch (err) {
-        console.error('Failed to set eyes reaction:', err);
+        console.error('Reaction/Action error:', err);
       }
 
-      try {
-        await sendChatAction(entity.telegram_bot_token, message.chat.id, 'typing', threadId);
-      } catch (err) {
-        console.error('Failed to send typing action:', err);
-      }
-
-      // Execute slow LLM task asynchronously in background
       waitUntil(
         (async () => {
           try {
@@ -574,29 +577,29 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               groupId: group.id,
               threadId: threadId,
               question: question,
+              model: bot.model,
+              persona: bot.persona,
             });
 
             const sanitizedAnswer = sanitizeForTelegramHtml(answerText);
 
-            await sendMessage(entity.telegram_bot_token, message.chat.id, sanitizedAnswer, {
+            await sendMessage(bot.telegram_bot_token, message.chat.id, sanitizedAnswer, {
               threadId: threadId,
               replyToMessageId: message.message_id,
               parseMode: 'HTML',
             });
 
-            // Phase 1: record the bot's response so the conversation log is complete
-            // (enables /recap and future multi-turn context). Non-fatal if it fails.
             try {
               await logBotResponse({
                 entityId: entity.id,
                 groupId: group.id,
                 telegramChatId: message.chat.id,
                 telegramThreadId: threadId,
-                botUsername: entity.telegram_bot_username,
-                messageText: answerText,   // store the ORIGINAL answer, not the HTML-sanitized one
-                summary: null,             // Phase 2 will fill this for long answers
+                botUsername: bot.telegram_username,
+                messageText: answerText,
+                summary: null,
                 generationMetadata: {
-                  model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+                  model: bot.model || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
                   thread_id: threadId,
                 },
               });
@@ -607,22 +610,17 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             console.error('Error handling async answer workflow:', err);
             try {
               await sendMessage(
-                entity.telegram_bot_token,
+                bot.telegram_bot_token,
                 message.chat.id,
                 `⚠️ <i>Sorry, something went wrong while processing your request.</i>`,
-                {
-                  threadId: threadId,
-                  replyToMessageId: message.message_id,
-                  parseMode: 'HTML',
-                }
+                { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
               );
             } catch (sendErr) {
-              console.error('Failed to send error fallback message:', sendErr);
+              console.error('Failed fallback:', sendErr);
             }
           }
         })()
       );
-
       return NextResponse.json({ ok: true, msg: 'Processing asynchronously' });
     }
 
@@ -633,14 +631,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   }
 }
 
-// Assemble the full-context markdown document (Entity / Group / Topic sections).
 function buildContextDocument(
   entityDocs: { doc_path: string; content: string }[],
   topicDocs: { doc_path: string; content: string }[]
 ): string {
   const sections: string[] = [];
   sections.push(`# Context the bot answers from\n`);
-
   sections.push(`## Entity context\n`);
   if (entityDocs.length > 0) {
     for (const d of entityDocs) {
@@ -649,10 +645,8 @@ function buildContextDocument(
   } else {
     sections.push(`_No entity-general context._\n`);
   }
-
   sections.push(`## Group context\n`);
   sections.push(`_Group-scoped context is not enabled in this version._\n`);
-
   sections.push(`## Topic context\n`);
   if (topicDocs.length > 0) {
     for (const d of topicDocs) {
@@ -661,7 +655,6 @@ function buildContextDocument(
   } else {
     sections.push(`_No topic-specific context._\n`);
   }
-
   return sections.join('\n');
 }
 
