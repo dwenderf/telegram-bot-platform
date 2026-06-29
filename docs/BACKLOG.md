@@ -53,6 +53,58 @@ When the async answer step throws, the bot replies with a generic "Sorry, someth
 
 ---
 
+## Open — platform direction (user-signal-backed)
+
+> These are larger than the polish items above and point toward the open-platform direction in
+> `docs/VISION.md`. They're recorded here (not just in VISION) because each has a **concrete first
+> increment** and a **real user signal** — making them buildable adjacent steps, not just horizon.
+> Discipline: build the *specific* increment when it's justified, not the grand version.
+
+### P1 — Notion sync-source (content connector)
+v1 content lives directly in `doc_cache`, pushed via SQL (DEPLOYMENT B2). The store is abstracted so
+alternate **sync-sources** can populate the same cache without touching the answer path. A **Notion**
+sync-source is the first concrete connector: pull pages from a Notion workspace into `doc_cache`,
+keeping content fresh as the source changes.
+- **First increment:** a one-direction Notion→`doc_cache` sync for a single entity (manual trigger or
+  webhook), not a generic connector framework. Prove the ingestion boundary with one real source.
+- **Dependency/seam:** the ingestion path should go through a clean function/API boundary (not ad-hoc
+  SQL) — that boundary is also what a future third-party connector would target. See `P3` and
+  `docs/VISION.md` Surface 1.
+- **User signal (2026-06-29):** a prospective user keeps his content in Notion and has struggled to
+  get comparable tools working because of it. *Why it matters:* removes a real adoption blocker;
+  validates the store abstraction with an actual source.
+
+### P2 — Private / permissioned custom bots (bot-store MVP)
+The `bots` table is first-class and decoupled from entities, with `persona` / `model` / `capabilities`
+stub columns and a dormant `bot_entities` authorization table. Together these support a **private,
+permissioned specialized bot** — a user brings a bot with their own skills/persona (and possibly own
+model source), gated via whitelist to authorized entities/groups. **No commerce, no public listing**
+— this is the bot-store *infrastructure* without the marketplace on top.
+- **First increment:** register one specialized bot (own `bots` row, own slug/token/webhook, a
+  persona/skill config) and gate its use to a whitelist via `bot_entities`. Curated/manual onboarding
+  (operator creates the bot) is fine and appropriate at low volume — the human gate is a feature.
+- **Seams already planted:** `bots.persona/model/capabilities` (the registered-backend seam);
+  `bot_entities` (the whitelist mechanism). Per-bot routing is already native (Phase 3).
+- **Invariant:** consumer onboarding (add bot, `/auth`, done) stays self-service; only the *submitter*
+  path is manual/curated.
+- **User signal (2026-06-29):** a collaborator wants his own AI skills usable by him and the people he
+  works with — explicitly *not* to sell, just to use privately with a permissioned group. *Why it
+  matters:* a real, scoped first customer for the bot-store foundation, de-risking it before any
+  marketplace. See `docs/VISION.md` Surface 2.
+
+### P3 — Clean content-ingestion boundary (forward-compat seam — do when content-management is built)
+Not a feature on its own, but a **constraint** on the content-management work (the `/manage`
+Documents/Context tab that will replace DEPLOYMENT B2's manual SQL): whatever writes to `doc_cache`
+should go through a well-defined function/API boundary, **not** ad-hoc SQL scattered across call
+sites. That boundary is the single door that (a) the web UI writes through, (b) a Notion/Git
+sync-source (`P1`) writes through, and (c) a future third-party connector would target. *Why it
+matters:* it's nearly free to get right while building the content UI, and expensive to retrofit; it's
+the enabling seam for the whole open-connector direction (`docs/VISION.md` Surface 3). **Do not build
+ahead of the content UI** — just build the content UI *through* a clean boundary when that work
+happens.
+
+---
+
 ## Open — non-security polish
 
 ### B1 — Model id: env-var default done; per-entity override remaining
