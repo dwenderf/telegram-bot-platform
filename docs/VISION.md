@@ -26,6 +26,29 @@ The moat shifts accordingly: from *"our bot is good"* to *"our ecosystem is wher
 connectors and skills live."* That is the same logic as an app store — the platform's value is the
 ecosystem it hosts, not any single first-party feature.
 
+### Sphere of focus: what *we* build vs. what the ecosystem builds (refined 2026-06-30)
+
+The boundary is **soft, not hard** — and the realistic early posture matters:
+
+- **Our core sphere = infrastructure + interface + docs.** The durable platform investment is (a) the
+  **base platform** (the bot, context resolution, the management plane), (b) the **web interface** for
+  direct, beginner-friendly content/management (the easiest on-ramp — manually edit context in the
+  UI), and (c) the **MCP/API integration layer + solid documentation** (Surface 3) that makes the
+  whole thing extensible. This is where effort concentrates.
+- **Connectors are *for* others — but we seed the first ones.** "Others build connectors" is **not**
+  something to expect early; an ecosystem doesn't materialize on day one. So near-term **we build basic
+  reference connectors ourselves** to (1) give users day-one utility and (2) serve as worked examples
+  others improve on later. The connector is utility-now *and* the reference implementation. Over time,
+  as the interface matures, connector-building shifts outward — but we prime the pump.
+- **First connector = GitHub.** Chosen over Notion because the GitHub-sync framework already partly
+  exists (dormant adapter code) and a git repo is a far simpler document source to reason about than
+  Notion's block model. GitHub is both the easier build and the cleaner reference example.
+- **Implication for priorities:** the *interface* (Surface 3) and the *web content UI* are core and
+  near-term; *connectors* (Surface 1, incl. Notion) are "build a reference one to unblock users, but
+  the long tail is ecosystem work." This nudges the platform/interface ahead of any individual
+  connector in importance — the connector is a means to validate and seed the interface, not the
+  destination.
+
 Three distinct extensibility surfaces, each with its own seam already partly in place:
 
 ### Surface 1 — Content sources (connectors)

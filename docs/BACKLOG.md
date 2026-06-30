@@ -48,6 +48,22 @@ Today only *incoming* (user) messages are logged to `message_log`; the bot's own
 ### Typing indicator persists for long answers
 Telegram's `sendChatAction` ("typing…") **auto-clears after ~5 seconds** (Telegram-side behavior). When answer generation takes longer than that — common for the multi-query model path — the indicator vanishes before the answer arrives, leaving a few seconds of dead air. Fix: **re-send the typing action periodically** (every ~4s) while generating, and stop when the answer is sent (e.g. a keep-alive interval kicked off at generation start, cleared on send). Small, self-contained UX polish. *Surfaced in normal use — the gap is minor but not ideal.*
 
+### Proactive "no context yet" notice for new topics (base-UX polish)
+When a new forum topic is created in a bound group, the bot could **detect it** (Telegram emits a
+`forum_topic_created` service message; alternatively a cron job polls for unseen `message_thread_id`s)
+and **proactively post a short note** — e.g. "No context has been set for this topic yet; answers here
+will use the group/entity context. An admin can add topic-specific docs in the dashboard." Turns a
+silent gap (a topic with no docs, where users may not realize why answers are generic) into a visible,
+actionable nudge.
+- **Pairs with Phase 4** (group/topic context resolution): once layered resolution exists, "this topic
+  has no topic-layer context" becomes a meaningful, detectable state worth surfacing.
+- **Related to `PLANNING.md` §9** `forum_topic_created` / `/setup` scaffolding: same event detection,
+  but this is the *notification* cousin (nudge the humans) vs. the *auto-scaffold* cousin (create a
+  manifest entry + starter doc). Could share the event-listener plumbing.
+- **Category:** base-platform UX polish — make the *existing* product feel finished before stacking
+  new layers on top. **Not yet** — just captured. *Why it matters:* reduces "why is the bot giving
+  generic answers here?" confusion; a small touch that makes the product feel attentive.
+
 ### Better user-facing error messages (low priority)
 When the async answer step throws, the bot replies with a generic "Sorry, something went wrong." That's good baseline UX (the graceful path works), but it's opaque. Low-priority improvement: optionally append `error.message` (or a friendlier mapped version) so the user/operator sees *what* failed (e.g. "the model is temporarily overloaded — try again" for a 529, vs. a config error). Its own small project; distinguish transient/retryable errors (429/529, `x-should-retry: true`) — which could even auto-retry — from real failures. *Surfaced when an Anthropic 529 "overloaded" (a transient outage) produced the generic message.*
 
@@ -60,19 +76,24 @@ When the async answer step throws, the bot replies with a generic "Sorry, someth
 > increment** and a **real user signal** — making them buildable adjacent steps, not just horizon.
 > Discipline: build the *specific* increment when it's justified, not the grand version.
 
-### P1 — Notion sync-source (content connector)
+### P1 — Reference content connector: GitHub first (then Notion)
 v1 content lives directly in `doc_cache`, pushed via SQL (DEPLOYMENT B2). The store is abstracted so
-alternate **sync-sources** can populate the same cache without touching the answer path. A **Notion**
-sync-source is the first concrete connector: pull pages from a Notion workspace into `doc_cache`,
-keeping content fresh as the source changes.
-- **First increment:** a one-direction Notion→`doc_cache` sync for a single entity (manual trigger or
-  webhook), not a generic connector framework. Prove the ingestion boundary with one real source.
-- **Dependency/seam:** the ingestion path should go through a clean function/API boundary (not ad-hoc
-  SQL) — that boundary is also what a future third-party connector would target. See `P3` and
-  `docs/VISION.md` Surface 1.
-- **User signal (2026-06-29):** a prospective user keeps his content in Notion and has struggled to
-  get comparable tools working because of it. *Why it matters:* removes a real adoption blocker;
-  validates the store abstraction with an actual source.
+alternate **sync-sources** can populate the same cache without touching the answer path. We build a
+**reference connector** ourselves — day-one utility *and* a worked example others extend later (see
+`docs/VISION.md` → Sphere of focus).
+- **GitHub first** (not Notion): the GitHub-sync framework already partly exists (dormant adapter
+  code), and a git repo is a far simpler document source than Notion's block model. Pull/sync repo
+  content into `doc_cache`, keeping it fresh on push.
+- **First increment:** one-direction GitHub→`doc_cache` sync for a single entity (webhook on push, or
+  manual trigger), reusing the retained sync code. Not a generic connector framework — one real
+  source, proving the ingestion boundary (`P3`).
+- **Notion: later.** Same pattern, second connector — has its own user signal (the Notion user,
+  2026-06-29) but is deferred behind GitHub on grounds of build simplicity. When built, it validates
+  that the ingestion boundary truly generalizes beyond git.
+- **Dependency/seam:** ingestion should go through a clean function/API boundary (`P3`), which is also
+  what a future third-party connector targets. See `docs/VISION.md` Surface 1.
+- *Why it matters:* day-one content utility for non-SQL users; the first reference implementation that
+  seeds the connector ecosystem; reuses existing GitHub-sync investment.
 
 ### P2 — Private / permissioned custom bots (bot-store MVP)
 The `bots` table is first-class and decoupled from entities, with `persona` / `model` / `capabilities`
