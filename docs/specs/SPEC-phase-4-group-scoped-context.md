@@ -1,27 +1,29 @@
 # SPEC — Phase 4: Group-Scoped Context Resolution
 
-> ⚠️ **HELD — DO NOT HAND OFF AS-IS. Revise after the manifest normalization lands.**
-> This spec was written against the *pre-normalization* schema (it joins on `doc_path`, references bare
-> `telegram_thread_id`, and adds its own `manifest_thread_requires_group` CHECK constraint). The
-> **manifest/doc-cache normalization** (`docs/specs/SPEC-manifest-doc-normalization.md`) runs **first**
-> and changes the schema underneath this spec. After it lands, revise per that spec's §7:
-> - **Delete** this spec's §2 CHECK-constraint migration — the hierarchy becomes FK-structural
->   (`manifest_entries.thread_id` → `threads` row → non-null `group_id`), so the CHECK is never needed.
-> - Resolver changes target `doc_id` / `thread_id` / `group_id` (the normalization already moves the
->   queries to that shape); Phase 4 adds only the `group_id IS NULL OR group_id = G` **layer logic**.
-> - Test setup uses `threads` rows + `doc_id` refs instead of bare `doc_path` / `telegram_thread_id`.
-> The *design* below (the three-layer additive union, the cross-group isolation fix) remains correct;
-> only the schema mechanics change. **Hand off the normalization spec first; revise then hand off this.**
+> ✅ **SHIPPED (2026-07-01) — built, reviewed, deployed, live-verified.** This spec has been
+> reconciled to match what was actually built. Two things differ from the original draft, both because
+> the **manifest/doc-cache normalization** (`SPEC-manifest-doc-normalization.md`) landed *first* and
+> changed the schema underneath this phase:
+> - **No CHECK-constraint migration.** The original §2 added a `manifest_thread_requires_group` CHECK.
+>   The normalization made the hierarchy **FK-structural** instead (`manifest_entries.thread_id` →
+>   `threads` row → non-null `group_id`), so the forbidden `(group NULL, thread non-null)` combination
+>   is structurally impossible — no CHECK needed. **Phase 4 shipped with zero migrations** (code-only).
+> - **Resolvers query the normalized shape:** join `doc_cache` on `m.doc_id = c.id`, LEFT JOIN
+>   `threads` to map `thread_id → telegram_thread_id`, select `c.display_name` (not `doc_path`). The
+>   group-layer logic Phase 4 added is the `(m.group_id is null or m.group_id = ${groupId})` clause.
+>
+> The **design** (the three-layer additive union, the cross-group isolation fix) shipped exactly as
+> specified below. Sections have been updated to the as-built mechanics; the layer model (§1) and
+> scope boundaries (§6) are unchanged from the original design.
 
-> **Reads against:** `lib/capabilities.ts` (`buildContext`, `getContextManifest`), the `/context`
-> command handler, `supabase/migrations/20260618000000_init_schema.sql` (`manifest_entries`),
-> `PLANNING.md` §9 (the three-layer hierarchy sketch), `docs/specs/SPEC-context-command.md`.
-> **Rigor bar:** match Phases 1–3. The two resolvers (`buildContext`, `getContextManifest`) MUST
-> change in lockstep — they already carry a standing comment saying so. Tests assert the layered
-> resolution AND the cross-group isolation that this phase fixes.
-> **One-line scope:** light up the **group** layer of context resolution
-> (`entity → group → topic`), which the schema already encodes (`manifest_entries.group_id`) but the
-> runtime currently ignores — and in doing so, fix a latent cross-group topic-id collision.
+> **Built against:** `lib/capabilities.ts` (`buildContext`, `getContextManifest`), the `/context`
+> handler in `app/api/webhooks/platform/[botSlug]/route.ts`, the normalized schema
+> (`20260701000000_manifest_normalization_additive.sql`: `manifest_entries.doc_id`/`thread_id`/
+> `group_id`, `threads`, `doc_cache.display_name`).
+> **Rigor bar:** matched Phases 1–3. The two resolvers (`buildContext`, `getContextManifest`) are
+> **byte-identical** in their doc query (verified in review) — they carry a lockstep-invariant comment.
+> **One-line scope:** light up the **group** layer of context resolution (`entity → group → topic`),
+> and thereby fix a latent cross-group topic-id collision.
 
 ---
 
@@ -82,94 +84,88 @@ surfaces.
 
 ---
 
-## 2. Schema change (one tiny additive migration)
+## 2. Schema change — NONE (as-built)
 
-> This revises `PLANNING.md` §9's "no migration needed" — that's true for the *resolution logic*, but
-> a CHECK constraint is needed to forbid the malformed layer and make the three-layer model provably
-> clean. Additive, no data change.
+> **As shipped: Phase 4 required no migration at all.** The original draft added a
+> `manifest_thread_requires_group` CHECK constraint to forbid the `(group NULL, thread non-null)`
+> combination. But the manifest normalization (which landed first) made this **structural**: a
+> `manifest_entries.thread_id` is an FK into `threads`, and every `threads` row has a **non-null**
+> `group_id`. So a topic-scoped manifest row can only reference a thread that belongs to a group — the
+> forbidden combination is impossible by FK structure, not by a CHECK. No constraint, no migration.
+>
+> The forbidden-combination *test* (originally §5 test 6) is likewise now a structural property; the
+> shipped suite proves it via the FK behavior rather than a CHECK violation.
 
-**Pre-check (run first, expect 0):**
-```sql
-select count(*) from public.manifest_entries
-where telegram_thread_id is not null and group_id is null;
-```
-If non-zero, those rows are the malformed combination and must be resolved (assign a group, or null
-the thread) before the constraint can be added. (Expected 0 — v1 never populated `group_id`, and
-entity-general rows have null `thread_id`.)
-
-**Migration (`supabase/migrations/<ts>_manifest_group_topic_check.sql`):**
-```sql
-alter table public.manifest_entries
-  add constraint manifest_thread_requires_group
-  check (telegram_thread_id is null or group_id is not null);
-```
-- Additive, reversible (`drop constraint` if ever needed).
-- No new RLS, no new function, no security surface — this phase adds none of the things Phase 3 did.
+*(Original §2 specified a CHECK-constraint migration; superseded by the normalization's FK structure.
+Retained here as a note for provenance.)*
 
 ---
 
 ## 3. Code changes (the two resolvers, in lockstep)
 
 ### 3.1 `buildContext(entityId, groupId, threadId)` — `lib/capabilities.ts`
-Signature **already has `groupId`** (currently used only for the message_log query). Change the **doc
-query** to the three-layer union:
+Signature already has `groupId`. The doc query (as shipped) joins the normalized schema and adds the
+group-layer clause:
 
 ```sql
-select m.group_id, m.telegram_thread_id, c.doc_path, c.content
+select m.thread_id, m.group_id, c.display_name, c.content
 from manifest_entries m
-join doc_cache c on c.entity_id = m.entity_id and c.doc_path = m.doc_path
+join doc_cache c on c.id = m.doc_id
+left join threads t on t.id = m.thread_id
 where m.entity_id = ${entityId}
-  and (m.group_id is null or m.group_id = ${groupId})
-  and (m.telegram_thread_id is null
-       or m.telegram_thread_id is not distinct from ${threadIdStr})
+  and (m.group_id is null or m.group_id = ${groupId}::uuid)
+  and (m.thread_id is null or t.telegram_thread_id = ${threadIdStr}::bigint)
 ```
-- The message_log query is **unchanged** (already correctly group-scoped).
-- **Sort** becomes three-tier (most-general first) for stable, sensible prompt ordering:
-  entity (group null, thread null) → group (group set, thread null) → topic (group set, thread set).
-  Update the existing two-way sort accordingly. (Ordering is cosmetic for an additive union, but keep
-  it deterministic and general-to-specific so the prompt reads predictably and `/context` matches.)
+- **LEFT JOIN `threads`** is load-bearing: entity/group-general rows have `thread_id IS NULL` and won't
+  match a `threads` row — an inner join would silently drop them. The `m.thread_id is null OR ...`
+  structure tolerates the null side.
+- The message_log (recent-conversation) query is **unchanged** — already correctly group+thread scoped.
+- **Sort** is three-tier JS-side (most-general first): entity (`group_id null, thread_id null`) →
+  group (`group_id set, thread_id null`) → topic (`thread_id set`). The comparator keys on `group_id`
+  *and* `thread_id` (the two-tier version couldn't distinguish entity from group).
 
-### 3.2 `getContextManifest(entityId, threadId)` → add `groupId` — `lib/capabilities.ts`
-This resolver currently **does not take `groupId`** and returns `{ entityDocs, topicDocs }`. Phase 4:
-- **Change signature → `getContextManifest(entityId, groupId, threadId)`.**
-- Apply the **same three-layer WHERE** as `buildContext` (they must match exactly — the standing
-  comment in the code says so).
-- **Extend the return shape** to three layers: `{ entityDocs, groupDocs, topicDocs }`, splitting rows
-  by `(group_id, telegram_thread_id)`:
-  - `entityDocs`  = `group_id IS NULL` (and thread null)
-  - `groupDocs`   = `group_id = G AND thread_id IS NULL`
-  - `topicDocs`   = `group_id = G AND thread_id = T`
-- Remove the now-resolved "v1: group-layer not yet resolved" NOTE comment; replace with a comment
-  asserting the lockstep invariant with `buildContext`.
+### 3.2 `getContextManifest(entityId, groupId, threadId)` — `lib/capabilities.ts`
+Signature gained `groupId` (was `(entityId, threadId)` — a breaking change; its caller was updated).
+- Uses the **byte-identical** doc query to `buildContext` (lockstep — verified in review).
+- Returns three layers `{ entityDocs, groupDocs, topicDocs }`, split by `(group_id, thread_id)`:
+  - `entityDocs` = `group_id === null && thread_id === null`
+  - `groupDocs`  = `group_id !== null && thread_id === null`  ← *only `group_id` distinguishes this
+    from `entityDocs`; both have null thread — the SELECT must fetch `m.group_id` to split them*
+  - `topicDocs`  = `thread_id !== null`
+- The stale "v1: group-layer not yet resolved" NOTE comment was replaced with a lockstep-invariant
+  assertion.
 
-### 3.3 The `/context` command handler — find and update its single caller
-`getContextManifest`'s signature change is breaking, so its caller (the `/context` handler, likely in
-the platform webhook route or a command module) **must** be updated to:
-- Pass `groupId` (it already resolves the group for the message — thread it through).
-- Render the **third layer**: the `/context` reply currently shows entity vs. topic; add **group**.
-  Update the status summary (e.g. `Entity: ✓ N · Group: ✓ M · Topic: ✓ K / none`) and the assembled
-  `context.md` so it reflects all three layers. See `SPEC-context-command.md` for the existing format;
-  extend, don't restructure.
+### 3.3 The `/context` command handler — caller updated
+In `app/api/webhooks/platform/[botSlug]/route.ts`:
+- The `/context` caller passes `group.id` (the breaking signature change).
+- `buildContextDocument` renders a third **`## Group context`** section; the status summary shows
+  `Entity: ✓ N · Group: ✓ M · Topic: ✓ K` with real per-layer counts (the group line was previously a
+  `— not enabled in this version` stub).
 
-> **`answerQuestion` needs no change** — it just calls `buildContext`, whose signature is unchanged.
+> **`answerQuestion` needed no change** — it calls `buildContext`, whose signature was unchanged.
 
 ---
 
-## 4. Files
+## 4. Files (as-built)
 
-- **[NEW]** `supabase/migrations/<ts>_manifest_group_topic_check.sql` — the CHECK constraint.
-- **[MODIFY]** `lib/capabilities.ts` — `buildContext` doc query + sort; `getContextManifest` signature,
-  query, return shape, comment.
-- **[MODIFY]** the `/context` command handler (its caller) — pass `groupId`, render the group layer.
-- **[MODIFY]** `docs/specs/SPEC-context-command.md` — note the third (group) layer (addendum).
-- **[NEW]** `scripts/test-group-scoped-context.ts` — the layered resolution + isolation test suite.
+- **[NONE]** No migration — Phase 4 shipped code-only (the FK structure from the normalization made the
+  originally-planned CHECK constraint unnecessary; see §2).
+- **[MODIFIED]** `lib/capabilities.ts` — `buildContext` doc query + three-tier sort; `getContextManifest`
+  signature (`+groupId`), byte-identical query, three-layer return shape, lockstep comment.
+- **[MODIFIED]** `app/api/webhooks/platform/[botSlug]/route.ts` — `/context` caller passes `group.id`;
+  `buildContextDocument` renders the group layer.
+- **[NEW]** `scripts/test-group-scoped-context.ts` — the layered-resolution + isolation test suite.
 
 ---
 
-## 5. Adversarial test cases (`scripts/test-group-scoped-context.ts`)
+## 5. Adversarial test cases (`scripts/test-group-scoped-context.ts`) — as shipped
 
-Same harness style; real roles; assert resolved doc sets by `doc_path`. Set up **one entity, two
-groups (G1, G2)** so cross-group isolation is provable.
+> The shipped suite maps to the setup below (identifiers illustrative). It uses the normalized schema
+> (docs referenced by `doc_id`, topics via `threads` rows), and — critically — **registers the same
+> thread id `5` in both G1 and G2** so the cross-group collision is actually exercised. All tests pass
+> (verified in review).
+
+Set up **one entity, two groups (G1, G2)** so cross-group isolation is provable.
 
 **Setup:** entity E; groups G1, G2. doc_cache docs: `d_entity`, `d_g1`, `d_g2`, `d_g1_t5`, `d_g2_t5`
 (note: same thread id `5` in both groups — the collision case). Manifest rows:
@@ -222,16 +218,15 @@ groups (G1, G2)** so cross-group isolation is provable.
 
 ---
 
-## 7. Handoff notes for Antigravity
+## 7. Handoff notes (as-built record)
 
-- **Change BOTH resolvers in lockstep** — `buildContext` and `getContextManifest` must use the
-  **identical** three-layer WHERE. The code already carries a comment demanding this; test 5 proves it.
-- **`getContextManifest`'s signature change is breaking** — update its caller (the `/context` handler)
-  in the same change, passing `groupId`, and render the new group layer in the reply.
-- **Write test 3 (cross-group topic isolation) first** — it's the correctness gap this phase closes;
-  use the **same thread id in two groups** in setup so the collision is actually exercised.
-- **Pre-check before the migration** — confirm zero `(thread non-null, group null)` rows exist, then
-  add the CHECK constraint (additive; in `supabase/migrations/`, not manual — it's safe and reversible).
-- **Keep `doc_cache` untouched** — Phase 4 is manifest-resolution only.
-- **Deterministic general-to-specific sort** in `buildContext` so the prompt and `/context` read
-  predictably.
+- **Both resolvers use the byte-identical three-layer doc query** — verified in review; they carry a
+  lockstep-invariant comment. (Test 6 proves parity.)
+- **`getContextManifest`'s signature change** (`+groupId`) was breaking; its `/context` caller was
+  updated in the same change, and the group layer is rendered in the reply.
+- **Test 3 (cross-group topic isolation)** uses the same thread id in two groups — the collision the
+  phase fixes is actually exercised. Test 4 (pure group-layer isolation) proves the group layer
+  independently of the topic layer.
+- **No migration** — the FK structure from the normalization makes the forbidden combination
+  structurally impossible (§2). `doc_cache` untouched.
+- **Deterministic general-to-specific sort** in `buildContext` (entity → group → topic).

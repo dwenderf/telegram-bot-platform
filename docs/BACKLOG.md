@@ -64,6 +64,37 @@ actionable nudge.
   new layers on top. **Not yet** — just captured. *Why it matters:* reduces "why is the bot giving
   generic answers here?" confusion; a small touch that makes the product feel attentive.
 
+### Sync Telegram display names (groups + topics) + `threads.display_name`
+The stored display names drift from Telegram's actual names. Two related gaps:
+- **`groups.display_name` goes stale** when a group is renamed in Telegram — nothing updates the stored
+  value. (Telegram emits a `new_chat_title` service message on group rename.)
+- **`threads` has no `display_name` column at all** — topic names aren't stored. Add a nullable
+  `display_name` to `threads` (the normalization anticipated this: "room for future metadata"). Topic
+  names arrive via `forum_topic_created` (name at creation) and `forum_topic_edited` (name change).
+
+**The feature:** a webhook listener for these three service-message update types that keeps
+`groups.display_name` / `threads.display_name` in sync going forward. The handler currently ignores
+service-message update types — this adds handling for them.
+- **Two parts, distinct:** (1) the **ongoing listener** keeps names fresh from now on; (2) a **one-time
+  backfill** of the currently-stale `groups.display_name` values — the listener won't fix already-stale
+  names unless the group is renamed again. *(The one-time backfill is trivial — 4 groups — and is done
+  manually in the Supabase table editor; only the ongoing listener is a build.)*
+- **Shares plumbing with the "proactive no-context notice"** item above — `forum_topic_created` is the
+  same event both features listen for (one nudges the humans, this one records the name; both want the
+  service-message listener). Build the listener once, hang both behaviors off it.
+- **Category:** base-platform UX polish. **Not yet** — captured. *Why it matters:* stale group/topic
+  names are a small but visible "this feels unmaintained" signal; and `threads.display_name` is the
+  natural home for topic names that `/context`, a future content UI, and the proactive-notice feature
+  all want.
+
+### Content UI: warn on duplicate `display_name` (when the content-management UI is built)
+`doc_cache` deliberately has **no** DB uniqueness on `(entity_id, display_name)` — duplicate doc names
+are a legitimate case (e.g. two groups each with an "Onboarding" doc), and identity is `doc_cache.id`,
+so nothing breaks. But a duplicate name is *usually* a mistake. When the content-management UI exists,
+it should **warn** (soft "you already have a doc called that — continue?"), not hard-fail. This is the
+UI-level guardrail that replaces the DB constraint we intentionally didn't add. *Why it matters:*
+catches accidental dupes without forbidding legitimate ones — enforce integrity at the DB, UX at the UI.
+
 ### Better user-facing error messages (low priority)
 When the async answer step throws, the bot replies with a generic "Sorry, something went wrong." That's good baseline UX (the graceful path works), but it's opaque. Low-priority improvement: optionally append `error.message` (or a friendlier mapped version) so the user/operator sees *what* failed (e.g. "the model is temporarily overloaded — try again" for a 529, vs. a config error). Its own small project; distinguish transient/retryable errors (429/529, `x-should-retry: true`) — which could even auto-retry — from real failures. *Surfaced when an Anthropic 529 "overloaded" (a transient outage) produced the generic message.*
 
