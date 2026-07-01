@@ -632,15 +632,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 }
 
 function buildContextDocument(
-  entityDocs: { doc_path: string; content: string }[],
-  topicDocs: { doc_path: string; content: string }[]
+  entityDocs: { display_name: string; content: string }[],
+  topicDocs: { display_name: string; content: string }[]
 ): string {
   const sections: string[] = [];
   sections.push(`# Context the bot answers from\n`);
   sections.push(`## Entity context\n`);
   if (entityDocs.length > 0) {
     for (const d of entityDocs) {
-      sections.push(`### ${d.doc_path}\n\n${d.content}\n`);
+      sections.push(`### ${d.display_name}\n\n${d.content}\n`);
     }
   } else {
     sections.push(`_No entity-general context._\n`);
@@ -650,7 +650,7 @@ function buildContextDocument(
   sections.push(`## Topic context\n`);
   if (topicDocs.length > 0) {
     for (const d of topicDocs) {
-      sections.push(`### ${d.doc_path}\n\n${d.content}\n`);
+      sections.push(`### ${d.display_name}\n\n${d.content}\n`);
     }
   } else {
     sections.push(`_No topic-specific context._\n`);

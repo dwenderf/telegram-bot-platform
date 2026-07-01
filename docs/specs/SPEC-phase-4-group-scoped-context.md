@@ -1,5 +1,18 @@
 # SPEC — Phase 4: Group-Scoped Context Resolution
 
+> ⚠️ **HELD — DO NOT HAND OFF AS-IS. Revise after the manifest normalization lands.**
+> This spec was written against the *pre-normalization* schema (it joins on `doc_path`, references bare
+> `telegram_thread_id`, and adds its own `manifest_thread_requires_group` CHECK constraint). The
+> **manifest/doc-cache normalization** (`docs/specs/SPEC-manifest-doc-normalization.md`) runs **first**
+> and changes the schema underneath this spec. After it lands, revise per that spec's §7:
+> - **Delete** this spec's §2 CHECK-constraint migration — the hierarchy becomes FK-structural
+>   (`manifest_entries.thread_id` → `threads` row → non-null `group_id`), so the CHECK is never needed.
+> - Resolver changes target `doc_id` / `thread_id` / `group_id` (the normalization already moves the
+>   queries to that shape); Phase 4 adds only the `group_id IS NULL OR group_id = G` **layer logic**.
+> - Test setup uses `threads` rows + `doc_id` refs instead of bare `doc_path` / `telegram_thread_id`.
+> The *design* below (the three-layer additive union, the cross-group isolation fix) remains correct;
+> only the schema mechanics change. **Hand off the normalization spec first; revise then hand off this.**
+
 > **Reads against:** `lib/capabilities.ts` (`buildContext`, `getContextManifest`), the `/context`
 > command handler, `supabase/migrations/20260618000000_init_schema.sql` (`manifest_entries`),
 > `PLANNING.md` §9 (the three-layer hierarchy sketch), `docs/specs/SPEC-context-command.md`.

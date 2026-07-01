@@ -142,28 +142,29 @@ export async function buildContext(
   const threadIdStr = threadId !== null && threadId !== undefined ? threadId.toString() : null;
 
   return await withTenantContext(entityId, async (tx) => {
-    // 1. Fetch manifest entries and join with cached doc content
-    const docs = await tx`
-      select m.telegram_thread_id, c.doc_path, c.content
+    // 1. Fetch manifest entries and join with cached doc content (behavior-preserving)
+    const docs = await tx<{ thread_id: string | null; display_name: string; content: string }[]>`
+      select m.thread_id, c.display_name, c.content
       from manifest_entries m
-      join doc_cache c on c.entity_id = m.entity_id and c.doc_path = m.doc_path
+      join doc_cache c on c.id = m.doc_id
+      left join threads t on t.id = m.thread_id
       where m.entity_id = ${entityId}
-        and (m.telegram_thread_id is null
-             or m.telegram_thread_id is not distinct from ${threadIdStr})
+        and (m.thread_id is null
+             or t.telegram_thread_id = ${threadIdStr}::bigint)
     `;
 
     // Sort: general docs (thread_id is null) first, then thread-specific docs
     const sortedDocs = [...docs].sort((a, b) => {
-      if (a.telegram_thread_id === null && b.telegram_thread_id !== null) return -1;
-      if (a.telegram_thread_id !== null && b.telegram_thread_id === null) return 1;
+      if (a.thread_id === null && b.thread_id !== null) return -1;
+      if (a.thread_id !== null && b.thread_id === null) return 1;
       return 0;
     });
 
-    // Format docs as structured XML tags
+    // Format docs as structured XML tags using display_name (Item 1b)
     const contextDocs = sortedDocs
       .map(
         (doc) =>
-          `<document path="${doc.doc_path}">\n${doc.content}\n</document>`
+          `<document path="${doc.display_name}">\n${doc.content}\n</document>`
       )
       .join('\n\n');
 
@@ -443,30 +444,31 @@ export async function getContextManifest(
   entityId: string,
   threadId: bigint | number | string | null
 ): Promise<{
-  entityDocs: { doc_path: string; content: string }[];
-  topicDocs: { doc_path: string; content: string }[];
+  entityDocs: { display_name: string; content: string }[];
+  topicDocs: { display_name: string; content: string }[];
 }> {
   const threadIdStr =
     threadId !== null && threadId !== undefined ? threadId.toString() : null;
 
   return await withTenantContext(entityId, async (tx) => {
-    const docs = await tx<{ telegram_thread_id: string | null; doc_path: string; content: string }[]>`
-      select m.telegram_thread_id, c.doc_path, c.content
+    const docs = await tx<{ thread_id: string | null; display_name: string; content: string }[]>`
+      select m.thread_id, c.display_name, c.content
       from manifest_entries m
-      join doc_cache c on c.entity_id = m.entity_id and c.doc_path = m.doc_path
+      join doc_cache c on c.id = m.doc_id
+      left join threads t on t.id = m.thread_id
       where m.entity_id = ${entityId}
-        and (m.telegram_thread_id is null
-             or m.telegram_thread_id is not distinct from ${threadIdStr})
-      order by c.doc_path
+        and (m.thread_id is null
+             or t.telegram_thread_id = ${threadIdStr}::bigint)
+      order by c.display_name
     `;
 
     const entityDocs = docs
-      .filter((d) => d.telegram_thread_id === null)
-      .map((d) => ({ doc_path: d.doc_path, content: d.content }));
+      .filter((d) => d.thread_id === null)
+      .map((d) => ({ display_name: d.display_name, content: d.content }));
 
     const topicDocs = docs
-      .filter((d) => d.telegram_thread_id !== null)
-      .map((d) => ({ doc_path: d.doc_path, content: d.content }));
+      .filter((d) => d.thread_id !== null)
+      .map((d) => ({ display_name: d.display_name, content: d.content }));
 
     return { entityDocs, topicDocs };
   });
