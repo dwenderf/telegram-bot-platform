@@ -142,21 +142,33 @@ export async function buildContext(
   const threadIdStr = threadId !== null && threadId !== undefined ? threadId.toString() : null;
 
   return await withTenantContext(entityId, async (tx) => {
-    // 1. Fetch manifest entries and join with cached doc content (behavior-preserving)
-    const docs = await tx<{ thread_id: string | null; display_name: string; content: string }[]>`
-      select m.thread_id, c.display_name, c.content
+    // 1. Fetch manifest entries and join with cached doc content (group-scoped)
+    // Lockstep Invariant: Must match getContextManifest query exactly
+    const docs = await tx<{ thread_id: string | null; group_id: string | null; display_name: string; content: string }[]>`
+      select m.thread_id, m.group_id, c.display_name, c.content
       from manifest_entries m
       join doc_cache c on c.id = m.doc_id
       left join threads t on t.id = m.thread_id
       where m.entity_id = ${entityId}
-        and (m.thread_id is null
-             or t.telegram_thread_id = ${threadIdStr}::bigint)
+        and (m.group_id is null or m.group_id = ${groupId}::uuid)
+        and (m.thread_id is null or t.telegram_thread_id = ${threadIdStr}::bigint)
     `;
 
-    // Sort: general docs (thread_id is null) first, then thread-specific docs
+    // Sort: general docs first (entity -> group -> topic)
     const sortedDocs = [...docs].sort((a, b) => {
-      if (a.thread_id === null && b.thread_id !== null) return -1;
-      if (a.thread_id !== null && b.thread_id === null) return 1;
+      // Entity layer: both group_id and thread_id are null
+      const aIsEntity = a.group_id === null && a.thread_id === null;
+      const bIsEntity = b.group_id === null && b.thread_id === null;
+      if (aIsEntity && !bIsEntity) return -1;
+      if (!aIsEntity && bIsEntity) return 1;
+
+      // Group layer: group_id is set, thread_id is null
+      const aIsGroup = a.group_id !== null && a.thread_id === null;
+      const bIsGroup = b.group_id !== null && b.thread_id === null;
+      if (aIsGroup && !bIsGroup) return -1;
+      if (!aIsGroup && bIsGroup) return 1;
+
+      // Topic layer: both are set
       return 0;
     });
 
@@ -431,46 +443,46 @@ export async function checkVaultSecretsHealth(
 }
 
 /**
- * Read-only: return the context docs that apply to a given entity + topic,
- * structured by layer (entity-general vs topic-specific). Used by the /context
- * command. Mirrors buildContext's manifest+cache resolution so /context shows
- * exactly what /ask would answer from.
- *
- * NOTE (v1): group-layer scoping (manifest_entries.group_id) is not yet resolved
- * here, matching buildContext. When group-scoped resolution lands (PLANNING §9),
- * update BOTH this and buildContext together so they stay in sync.
+ * Resolves context document manifest for `/context` status and downloads.
+ * Lockstep Invariant: Must match buildContext query exactly
  */
 export async function getContextManifest(
   entityId: string,
+  groupId: string,
   threadId: bigint | number | string | null
 ): Promise<{
   entityDocs: { display_name: string; content: string }[];
+  groupDocs: { display_name: string; content: string }[];
   topicDocs: { display_name: string; content: string }[];
 }> {
   const threadIdStr =
     threadId !== null && threadId !== undefined ? threadId.toString() : null;
 
   return await withTenantContext(entityId, async (tx) => {
-    const docs = await tx<{ thread_id: string | null; display_name: string; content: string }[]>`
-      select m.thread_id, c.display_name, c.content
+    const docs = await tx<{ thread_id: string | null; group_id: string | null; display_name: string; content: string }[]>`
+      select m.thread_id, m.group_id, c.display_name, c.content
       from manifest_entries m
       join doc_cache c on c.id = m.doc_id
       left join threads t on t.id = m.thread_id
       where m.entity_id = ${entityId}
-        and (m.thread_id is null
-             or t.telegram_thread_id = ${threadIdStr}::bigint)
+        and (m.group_id is null or m.group_id = ${groupId}::uuid)
+        and (m.thread_id is null or t.telegram_thread_id = ${threadIdStr}::bigint)
       order by c.display_name
     `;
 
     const entityDocs = docs
-      .filter((d) => d.thread_id === null)
+      .filter((d) => d.group_id === null && d.thread_id === null)
+      .map((d) => ({ display_name: d.display_name, content: d.content }));
+
+    const groupDocs = docs
+      .filter((d) => d.group_id !== null && d.thread_id === null)
       .map((d) => ({ display_name: d.display_name, content: d.content }));
 
     const topicDocs = docs
       .filter((d) => d.thread_id !== null)
       .map((d) => ({ display_name: d.display_name, content: d.content }));
 
-    return { entityDocs, topicDocs };
+    return { entityDocs, groupDocs, topicDocs };
   });
 }
 

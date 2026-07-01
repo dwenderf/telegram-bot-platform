@@ -415,13 +415,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       waitUntil(
         (async () => {
           try {
-            const { entityDocs, topicDocs } = await getContextManifest(entity.id, threadId);
-            const totalDocs = entityDocs.length + topicDocs.length;
+            const { entityDocs, groupDocs, topicDocs } = await getContextManifest(entity.id, group.id, threadId);
+            const totalDocs = entityDocs.length + groupDocs.length + topicDocs.length;
 
             const entityText = entityDocs.length > 0
               ? `✓ ${entityDocs.length} document${entityDocs.length === 1 ? '' : 's'}`
               : `<i>— none set</i>`;
-            const groupText = `<i>— not enabled in this version</i>`;
+            const groupText = groupDocs.length > 0
+              ? `✓ ${groupDocs.length} document${groupDocs.length === 1 ? '' : 's'}`
+              : `<i>— none set</i>`;
             const topicText = topicDocs.length > 0
               ? `✓ ${topicDocs.length} document${topicDocs.length === 1 ? '' : 's'}`
               : `<i>— none set</i>`;
@@ -449,7 +451,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             );
 
             if (totalDocs > 0) {
-              const docMarkdown = buildContextDocument(entityDocs, topicDocs);
+              const docMarkdown = buildContextDocument(entityDocs, groupDocs, topicDocs);
               await sendDocument(
                 bot.telegram_bot_token,
                 message.chat.id,
@@ -633,6 +635,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
 function buildContextDocument(
   entityDocs: { display_name: string; content: string }[],
+  groupDocs: { display_name: string; content: string }[],
   topicDocs: { display_name: string; content: string }[]
 ): string {
   const sections: string[] = [];
@@ -646,7 +649,13 @@ function buildContextDocument(
     sections.push(`_No entity-general context._\n`);
   }
   sections.push(`## Group context\n`);
-  sections.push(`_Group-scoped context is not enabled in this version._\n`);
+  if (groupDocs.length > 0) {
+    for (const d of groupDocs) {
+      sections.push(`### ${d.display_name}\n\n${d.content}\n`);
+    }
+  } else {
+    sections.push(`_No group-scoped context._\n`);
+  }
   sections.push(`## Topic context\n`);
   if (topicDocs.length > 0) {
     for (const d of topicDocs) {
