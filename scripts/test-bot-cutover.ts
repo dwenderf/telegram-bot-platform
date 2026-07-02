@@ -13,7 +13,13 @@ import { setMockCallModel } from '../lib/anthropic';
 
 // Stub model call directly
 setMockCallModel(async () => {
-  return { text: 'This is a mock answer grounded in test docs.' };
+  return {
+    text: 'This is a mock answer grounded in test docs.',
+    usage: { input_tokens: 100, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0 },
+    model: 'claude-3-5-sonnet-20241022',
+    requestId: 'req-123',
+    stopReason: 'end_turn',
+  };
 });
 
 let mockChatMemberStatus = 'administrator';

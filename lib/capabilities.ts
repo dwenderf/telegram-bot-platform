@@ -1,5 +1,5 @@
 import { sql, withTenantContext } from './supabase';
-import { callModel } from './anthropic';
+import { callModel, CallModelResult } from './anthropic';
 
 export interface Entity {
   id: string;
@@ -204,6 +204,64 @@ export async function buildContext(
 }
 
 /**
+ * Safely log a model call to the model_calls ledger.
+ * Wrapped in try-catch so failures never block the user-facing answers.
+ */
+async function logModelCall(input: {
+  entityId: string;
+  groupId: string | null;
+  threadId: bigint | number | string | null;
+  botId?: string | null;
+  callType: 'answer' | 'recap';
+  result: CallModelResult;
+}): Promise<void> {
+  try {
+    const threadIdStr = input.threadId !== null && input.threadId !== undefined ? input.threadId.toString() : null;
+
+    await withTenantContext(input.entityId, async (tx) => {
+      let resolvedThreadId: string | null = null;
+      if (threadIdStr) {
+        // Resolve structural thread row id
+        const threadRow = await tx<{ id: string }[]>`
+          select id from public.threads
+          where group_id = ${input.groupId}::uuid and telegram_thread_id = ${threadIdStr}::bigint
+        `;
+        if (threadRow.length > 0) {
+          resolvedThreadId = threadRow[0].id;
+        }
+      }
+
+      await tx`
+        insert into public.model_calls (
+          entity_id, group_id, thread_id, bot_id, call_type, model, provider,
+          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, metadata
+        ) values (
+          ${input.entityId}::uuid,
+          ${input.groupId}::uuid,
+          ${resolvedThreadId}::uuid,
+          ${input.botId || null}::uuid,
+          ${input.callType},
+          ${input.result.model},
+          'anthropic',
+          ${input.result.usage.input_tokens ?? null},
+          ${input.result.usage.output_tokens ?? null},
+          ${input.result.usage.cache_read_tokens ?? 0},
+          ${input.result.usage.cache_creation_tokens ?? 0},
+          ${tx.json({
+            requestId: input.result.requestId,
+            stopReason: input.result.stopReason,
+            telegramThreadId: threadIdStr ? parseInt(threadIdStr, 10) : null,
+            ...input.result.raw
+          })}
+        )
+      `;
+    });
+  } catch (error) {
+    console.error('Failed to log model call:', error);
+  }
+}
+
+/**
  * Generate an answer. Internally builds the system prompt, calls the model provider, and returns answer.
  */
 export async function answerQuestion(input: {
@@ -246,6 +304,14 @@ ${recentConversation}`;
     systemPrompt,
     userMessage: input.question,
     model,
+  });
+
+  await logModelCall({
+    entityId: input.entityId,
+    groupId: input.groupId,
+    threadId: input.threadId,
+    callType: 'answer',
+    result,
   });
 
   return {
@@ -393,6 +459,14 @@ Guidelines:
     systemPrompt,
     userMessage: `Recap the last ${input.limit} messages of this conversation:\n\n${transcript}`,
     model,
+  });
+
+  await logModelCall({
+    entityId: input.entityId,
+    groupId: input.groupId,
+    threadId: input.threadId,
+    callType: 'recap',
+    result,
   });
 
   return { recapText: result.text };

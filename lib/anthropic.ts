@@ -10,13 +10,27 @@ const anthropic = new Anthropic({
   apiKey: apiKey || 'dummy-key',
 });
 
-interface CallModelInput {
+export interface CallModelInput {
   systemPrompt: string;
   userMessage: string;
   model: string;
 }
 
-let mockCallModel: ((input: CallModelInput) => Promise<{ text: string }>) | null = null;
+export interface CallModelResult {
+  text: string;
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_creation_tokens: number;
+  };
+  model: string;
+  requestId: string | null;
+  stopReason: string | null;
+  raw?: Record<string, any>;
+}
+
+let mockCallModel: ((input: CallModelInput) => Promise<CallModelResult>) | null = null;
 export function setMockCallModel(mock: typeof mockCallModel) {
   mockCallModel = mock;
 }
@@ -25,7 +39,7 @@ export function setMockCallModel(mock: typeof mockCallModel) {
  * Interface to communicate with the Anthropic Messages API.
  * Leverages Prompt Caching (Beta) for static system prompts to minimize latency and token costs.
  */
-export async function callModel(input: CallModelInput): Promise<{ text: string }> {
+export async function callModel(input: CallModelInput): Promise<CallModelResult> {
   if (mockCallModel) {
     return await mockCallModel(input);
   }
@@ -69,7 +83,18 @@ export async function callModel(input: CallModelInput): Promise<{ text: string }
       }
     }
 
-    return { text: replyText };
+    return {
+      text: replyText,
+      usage: {
+        input_tokens: response.usage.input_tokens,
+        output_tokens: response.usage.output_tokens,
+        cache_read_tokens: (response.usage as any).cache_read_input_tokens || 0,
+        cache_creation_tokens: (response.usage as any).cache_creation_input_tokens || 0,
+      },
+      model: response.model,
+      requestId: response.id,
+      stopReason: response.stop_reason,
+    };
   } catch (error: any) {
     console.error('Anthropic API call failed:', error);
     throw new Error(`Failed to generate answer from Anthropic: ${error.message}`);
