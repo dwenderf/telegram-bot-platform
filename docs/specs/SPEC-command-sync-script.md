@@ -1,5 +1,10 @@
 # SPEC: command sync script + shared command list (for Antigravity)
 
+> [!IMPORTANT]
+> **Superseded by [SPEC-command-sync-platform-bots.md](file:///Users/davidwender/Documents/GitHub/telegram-bot-platform/docs/specs/SPEC-command-sync-platform-bots.md) (Phase 3 cutover)**:
+> This document remains in the repository as a historical reference. The shared command list in `lib/commands.ts` remains active, but the script iteration model has been repointed to the platform-bot table.
+
+
 > **Status:** ready to implement.
 > **Goal:** make the bot command menu (`setMyCommands`) (a) defined in **one** place that can't drift, and (b) **re-registrable across all entities' bots** with a single command, instead of hand-running a curl per bot.
 > **Scope (deliberately minimal):** a **maintenance script** in `scripts/`, run **manually** with an **admin/privileged DB connection**. NOT a deployed endpoint (that's a future management-plane concern — see MANAGEMENT-PROPOSAL.md). Build only the script + the shared list now.

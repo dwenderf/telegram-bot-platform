@@ -326,10 +326,11 @@ curl "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands" \
 > **@mention**, not a slash command (Phase 3 trigger-model change). The canonical list lives in
 > `lib/commands.ts`.
 >
-> `[VERIFY]` **`scripts/sync-commands.ts` is currently stale** — it was written for the retired
-> per-entity-bot model and targets per-entity tokens, **not** the platform bot from the `bots` table.
-> Until it's updated, register the platform bot's menu with the direct `curl` above. (Updating the
-> script to read the platform bot(s) from `bots` is a tracked cleanup — see Open Items.)
+> `scripts/sync-commands.ts` is the canonical tool to synchronize the command list across all active
+> platform bots defined in the `bots` table. If registering slash commands for a single new platform
+> bot during manual setup, the `curl` sequence above can be run directly (sourcing the command list from
+> `lib/commands.ts`). To bulk-sync all active platform bots after a command-list change in `lib/commands.ts`,
+> run the script instead (see A8c.3 above).
 
 ## A9. Platform smoke test (curl — verified)
 
@@ -653,7 +654,7 @@ select vault.update_secret(
 ## Open items this guide surfaced (for BACKLOG / Antigravity confirmation)
 
 - **`prepare: false` in `lib/supabase.ts`** (A7) — ✅ confirmed set; required for the Supavisor transaction pooler.
-- **`scripts/sync-commands.ts` is stale (post-Phase-3)** (A8c) — it was written for the per-entity-bot model and registers commands against per-entity bot tokens, **not** the platform bot from the `bots` table. Until updated, set the platform bot's command menu with the direct `curl` in A8c.3. **Fix:** rewrite it to read the platform bot(s) from `bots` and use their tokens.
+- **`scripts/sync-commands.ts` is updated** (A8c) — ✅ repointed to iterate active platform bots (`bots` table) and decrypt tokens via `get_current_bot_secret`. Bulk-syncs all active bots from the shared command list in `lib/commands.ts`.
 - **Phase 3.1 deferred cleanup** — once the platform bot is trusted in production: drop the now-unused `entities.telegram_bot_token_id` / `telegram_webhook_secret_id` / `telegram_bot_username` columns + modify `get_current_entity_secret` to drop their refs (keep `github_token_id`); delete the retired bots' Vault secrets; `/deletebot` the old bots in BotFather. Manual migration in `supabase/manual/`; snapshot the `entities` table first (a manual `pg_dump`/`select` suffices — data already mirrored into `bots`). See `docs/specs/SPEC-phase-3-bot-cutover.md` §9.
 - **Content management in the dashboard** (B2) — v1 content is pushed via manual SQL upserts (the *interim* path). Planned: a "Documents"/"Context" tab in `/manage` (mirroring the Linked Groups pattern) that writes to `doc_cache` through a clean function/API boundary — which is also the seam a future sync-source/connector would target (see `docs/VISION.md`, Surface 1). Until then, B2's SQL is the content path.
 - **`github_*` columns relaxed to nullable** (B1) — ✅ done (migration `20260624000000_relax_github_columns.sql`). The entity insert omits the nullable `github_*` columns in v1. (Future: a `sync_sources` refactor could move GitHub config out of `entities` when the content-store abstraction is formalized.) **Coordinated code change done:** the `Entity` TS interface in `lib/capabilities.ts` marks the `github_*` fields as `string | null`; the GitHub sync route has a config-completeness guard.

@@ -1,4 +1,5 @@
-// Re-registers the bot command menu (setMyCommands) for EVERY entity's bot.
+// Re-registers the bot command menu (setMyCommands) for every ACTIVE platform bot.
+// Must be run manually once after any changes to `lib/commands.ts`.
 //
 // Run manually with an admin DB connection. You MUST `export` the variable so
 // the npx child process inherits it (a bare assignment is only visible to the
@@ -34,35 +35,36 @@ async function main() {
   const sql = postgres(adminUrl, { max: 4, idle_timeout: 10, connect_timeout: 10, prepare: false });
 
   try {
-    // 1. All entities with a bot token reference.
-    const entities = await sql<{ id: string; slug: string; telegram_bot_token_id: string }[]>`
-      select id, slug, telegram_bot_token_id
-      from entities
-      where telegram_bot_token_id is not null
+    // 1. All active platform bots.
+    const bots = await sql<{ id: string; slug: string; telegram_username: string | null; token_secret_ref: string }[]>`
+      select id, slug, telegram_username, token_secret_ref
+      from public.bots
+      where status = 'active' and token_secret_ref is not null
       order by slug
     `;
 
-    if (entities.length === 0) {
-      console.log('No entities with a bot token found. Nothing to do.');
+    if (bots.length === 0) {
+      console.log('No active platform bots found. Nothing to do.');
       return;
     }
 
     let failures = 0;
 
-    for (const e of entities) {
+    for (const b of bots) {
+      const displayName = b.telegram_username ? `@${b.telegram_username}` : b.slug;
       try {
-        // 2. Decrypt this entity's bot token via the sanctioned path,
-        //    inside its RLS context (approach A).
+        // 2. Decrypt this bot's token via the sanctioned path,
+        //    inside its bot context.
         const token = await sql.begin(async (tx) => {
-          await tx`select set_config('app.current_entity_id', ${e.id}, true)`;
+          await tx`select set_config('app.current_bot_id', ${b.id}, true)`;
           const rows = await tx<{ token: string | null }[]>`
-            select get_current_entity_secret(${e.telegram_bot_token_id}) as token
+            select public.get_current_bot_secret(${b.token_secret_ref}) as token
           `;
           return rows[0]?.token ?? null;
         });
 
         if (!token) {
-          console.error(`✗ ${e.slug}: could not decrypt bot token (null).`);
+          console.error(`✗ ${displayName}: could not decrypt bot token (null).`);
           failures++;
           continue;
         }
@@ -78,18 +80,18 @@ async function main() {
         );
         const json = await res.json();
         if (json.ok) {
-          console.log(`✓ ${e.slug}: commands registered (${BOT_COMMANDS.length}).`);
+          console.log(`✓ ${displayName}: commands registered (${BOT_COMMANDS.length}).`);
         } else {
-          console.error(`✗ ${e.slug}: Telegram rejected — ${JSON.stringify(json)}`);
+          console.error(`✗ ${displayName}: Telegram rejected — ${JSON.stringify(json)}`);
           failures++;
         }
       } catch (err) {
-        console.error(`✗ ${e.slug}: error —`, err);
+        console.error(`✗ ${displayName}: error —`, err);
         failures++;
       }
     }
 
-    console.log(`\nDone. ${entities.length - failures}/${entities.length} succeeded.`);
+    console.log(`\nDone. ${bots.length - failures}/${bots.length} succeeded.`);
     if (failures > 0) process.exit(1);
   } finally {
     await sql.end();
