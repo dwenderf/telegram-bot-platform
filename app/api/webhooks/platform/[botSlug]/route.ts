@@ -20,6 +20,7 @@ import {
   sanitizeForTelegramHtml,
   getChatMember,
 } from '@/lib/telegram';
+import { getModelIdentifier } from '@/lib/config';
 
 const DEFAULT_RECAP = 20;
 const MAX_RECAP = 100;
@@ -531,7 +532,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                 messageText: recapText,
                 summary: null,
                 generationMetadata: {
-                  model: bot.model || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+                  model: bot.model || getModelIdentifier(),
                   thread_id: threadId,
                   kind: 'recap',
                   recap_limit: requested,
@@ -601,7 +602,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                 messageText: answerText,
                 summary: null,
                 generationMetadata: {
-                  model: bot.model || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+                  model: bot.model || getModelIdentifier(),
                   thread_id: threadId,
                 },
               });

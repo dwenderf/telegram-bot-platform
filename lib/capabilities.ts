@@ -1,5 +1,6 @@
 import { sql, withTenantContext } from './supabase';
 import { callModel, CallModelResult } from './anthropic';
+import { getModelIdentifier, getContextMessageHistoryLimit } from './config';
 
 export interface Entity {
   id: string;
@@ -143,7 +144,9 @@ export async function buildContext(
 
   return await withTenantContext(entityId, async (tx) => {
     // 1. Fetch manifest entries and join with cached doc content (group-scoped)
-    // Lockstep Invariant: Must match getContextManifest query exactly
+    // Lockstep Invariant (Row Selection only): Must match getContextManifest query WHERE/joins exactly.
+    // Ordering differs: getContextManifest sorts alphabetically for display, while buildContext sorts
+    // by layer + doc_id to guarantee byte-stable prompts for caching.
     const docs = await tx<{ thread_id: string | null; group_id: string | null; display_name: string; content: string }[]>`
       select m.thread_id, m.group_id, c.display_name, c.content
       from manifest_entries m
@@ -152,42 +155,31 @@ export async function buildContext(
       where m.entity_id = ${entityId}
         and (m.group_id is null or m.group_id = ${groupId}::uuid)
         and (m.thread_id is null or t.telegram_thread_id = ${threadIdStr}::bigint)
+      order by
+        case
+          when m.group_id is null and m.thread_id is null then 0  -- entity
+          when m.thread_id is null then 1                          -- group
+          else 2                                                    -- topic
+        end,
+        m.doc_id
     `;
 
-    // Sort: general docs first (entity -> group -> topic)
-    const sortedDocs = [...docs].sort((a, b) => {
-      // Entity layer: both group_id and thread_id are null
-      const aIsEntity = a.group_id === null && a.thread_id === null;
-      const bIsEntity = b.group_id === null && b.thread_id === null;
-      if (aIsEntity && !bIsEntity) return -1;
-      if (!aIsEntity && bIsEntity) return 1;
-
-      // Group layer: group_id is set, thread_id is null
-      const aIsGroup = a.group_id !== null && a.thread_id === null;
-      const bIsGroup = b.group_id !== null && b.thread_id === null;
-      if (aIsGroup && !bIsGroup) return -1;
-      if (!aIsGroup && bIsGroup) return 1;
-
-      // Topic layer: both are set
-      return 0;
-    });
-
     // Format docs as structured XML tags using display_name (Item 1b)
-    const contextDocs = sortedDocs
+    const contextDocs = docs
       .map(
         (doc) =>
           `<document path="${doc.display_name}">\n${doc.content}\n</document>`
       )
       .join('\n\n');
 
-    // 2. Fetch the most recent 30 messages in this thread
+    // 2. Fetch the most recent configured messages in this thread
     const messages = await tx`
       select username, message_text, created_at
       from message_log
       where group_id = ${groupId}
         and telegram_thread_id is not distinct from ${threadIdStr}
       order by created_at desc
-      limit 30
+      limit ${getContextMessageHistoryLimit()}
     `;
 
     // Format messages in chronological order (oldest first)
@@ -279,9 +271,9 @@ export async function answerQuestion(input: {
     input.threadId
   );
 
-  const model = input.model || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+  const model = input.model || getModelIdentifier();
 
-  const defaultPersona = `You are a helpful AI assistant for the team. Answer the user's question accurately based ONLY on the provided context documents. If the answer cannot be determined from the context, politely state that you do not know.
+  const defaultPersona = `You are a helpful AI assistant for the team. Answer the user's question accurately based on the provided context documents and the recent conversation history. If the answer cannot be determined from these, politely state that you do not know.
 
 OUTPUT FORMAT RULES (CRITICAL):
 - Use Telegram-HTML format.
@@ -295,14 +287,17 @@ OUTPUT FORMAT RULES (CRITICAL):
   const systemPrompt = `${basePersona}
 
 PROJECT CONTEXT:
-${contextDocs}
+${contextDocs}`;
 
-RECENT CONVERSATION:
-${recentConversation}`;
+  const userMessage = `RECENT CONVERSATION:
+${recentConversation}
+
+QUESTION:
+${input.question}`;
 
   const result = await callModel({
     systemPrompt,
-    userMessage: input.question,
+    userMessage,
     model,
   });
 
@@ -440,7 +435,7 @@ export async function recapConversation(input: {
     return { recapText: 'There are no recent messages in this topic to recap yet.' };
   }
 
-  const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+  const model = getModelIdentifier();
   const systemPrompt = `You are summarizing a team chat conversation. Produce a concise, well-organized recap of the discussion below.
 
 OUTPUT FORMAT RULES (CRITICAL):
@@ -518,7 +513,9 @@ export async function checkVaultSecretsHealth(
 
 /**
  * Resolves context document manifest for `/context` status and downloads.
- * Lockstep Invariant: Must match buildContext query exactly
+ * Lockstep Invariant (Row Selection only): Must match buildContext query WHERE/joins exactly.
+ * Ordering differs: getContextManifest sorts alphabetically for display, while buildContext sorts
+ * by layer + doc_id to guarantee byte-stable prompts for caching.
  */
 export async function getContextManifest(
   entityId: string,

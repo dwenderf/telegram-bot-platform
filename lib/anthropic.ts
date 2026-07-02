@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { getModelMaxOutputTokens } from './config';
 
 const apiKey = process.env.ANTHROPIC_API_KEY;
 
@@ -49,7 +50,7 @@ export async function callModel(input: CallModelInput): Promise<CallModelResult>
     const response = await anthropic.messages.create(
       {
         model: input.model,
-        max_tokens: 2048,
+        max_tokens: getModelMaxOutputTokens(),
         system: [
           {
             type: 'text',

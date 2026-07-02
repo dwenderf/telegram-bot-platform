@@ -10,6 +10,7 @@ import path from 'path';
 import { POST } from '../app/api/webhooks/platform/[botSlug]/route';
 import { NextRequest } from 'next/server';
 import { setMockCallModel } from '../lib/anthropic';
+import { getModelIdentifier } from '../lib/config';
 
 // Stub model call directly
 setMockCallModel(async () => {
@@ -613,7 +614,7 @@ async function main() {
     `;
     assert.strictEqual(
       defaultModelRow[0].generation_metadata?.model,
-      process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+      getModelIdentifier(),
       'Test 12 Failed: Expected fallback model Claude Sonnet default'
     );
     console.log('✅ Test 12 Passed.');
