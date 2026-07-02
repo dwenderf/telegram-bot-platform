@@ -1,44 +1,10 @@
 // Adversarial Test Suite for Phase 2 Group Linking Flow
 // Run with: node --env-file=.env.local node_modules/tsx/dist/cli.mjs scripts/test-group-linking.ts
 
-process.env.ANTHROPIC_API_KEY = 'dummy-test-key';
-
-// Mock Vercel request context to capture waitUntil promises
-const pendingPromises: Promise<any>[] = [];
-globalThis[Symbol.for("@vercel/request-context") as any] = {
-  get() {
-    return {
-      waitUntil(promise: Promise<any>) {
-        pendingPromises.push(promise);
-      }
-    };
-  }
-};
-
 import postgres from 'postgres';
 import assert from 'assert';
-import { POST } from '../app/api/webhooks/telegram/[entitySlug]/route';
-import { NextRequest } from 'next/server';
 import fs from 'fs';
 import path from 'path';
-
-let mockChatMemberStatus = 'administrator';
-
-// Mock global fetch to intercept outbound Telegram API requests
-const originalFetch = global.fetch;
-global.fetch = (async (url: any, options: any) => {
-  const urlStr = url.toString();
-  if (urlStr.includes('api.telegram.org')) {
-    if (urlStr.includes('getChatMember')) {
-      return new Response(JSON.stringify({ ok: true, result: { status: mockChatMemberStatus } }), { status: 200 });
-    }
-    if (urlStr.includes('sendMessage') || urlStr.includes('setMessageReaction')) {
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 12345 } }), { status: 200 });
-    }
-    return new Response(JSON.stringify({ ok: true }), { status: 200 });
-  }
-  return originalFetch(url, options);
-}) as any;
 
 // Helper to run query as a simulated authenticated Supabase user
 async function runAsUser<T>(
@@ -352,55 +318,6 @@ async function main() {
     }
     console.log('✅ Test 11 Passed.');
 
-    // =========================================================================
-    // Test Case 12: Admin-Gate Webhook Handler Integration (S1)
-    // =========================================================================
-    console.log('Test 12: Admin-gate webhook handler integration...');
-    // Mint code for E1
-    const webhookCode = await runAsUser(sql, USER_A, 'owner_a@test.com', async (tx) => {
-      const res = await tx<{ mint_link_token: string }[]>`select public.mint_link_token(${E1})`;
-      return res[0].mint_link_token;
-    });
-
-    // Mock non-admin user
-    mockChatMemberStatus = 'member';
-
-    const req = new NextRequest('http://localhost:3000/api/webhooks/telegram/entity-1-test', {
-      method: 'POST',
-      headers: {
-        'x-telegram-bot-api-secret-token': 'mock-webhook-secret', // not matched, but wait, E1 has no secret in vault
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        update_id: 200001,
-        message: {
-          message_id: 1001,
-          chat: { id: 999007, type: 'supergroup', is_forum: true, title: 'Web Group' },
-          from: { id: 7777, username: 'nonadmin' },
-          text: `/auth ${webhookCode}`,
-        },
-      }),
-    });
-
-    // Verify that the webhook POST function validates the x-telegram-bot-api-secret-token correctly.
-    // The setup block seeded Vault secrets for E1, so 'x-telegram-bot-api-secret-token' matches the configured secret.
-    const res = await POST(req, { params: Promise.resolve({ entitySlug: 'entity-1-test' }) });
-    const resJson = await res.json();
-    assert.strictEqual(res.status, 200);
-    assert.strictEqual(resJson.msg, 'Not admin', 'Expected command to reject with Not admin');
-
-    // Assert that:
-    // 1. The token was NOT consumed
-    const tokenCheck = await sql`select consumed_at from public.link_tokens where token_hash = encode(sha256(${webhookCode}::bytea), 'hex')`;
-    assert.strictEqual(tokenCheck[0].consumed_at, null, 'Test 12 Failed: Token was consumed by a non-admin');
-
-    // 2. No groups row was created for chat 999007
-    const groupCheck = await sql`select * from public.groups where telegram_chat_id = 999007`;
-    assert.strictEqual(groupCheck.length, 0, 'Test 12 Failed: Group row was created for a non-admin request');
-
-    // Restore administrator status
-    mockChatMemberStatus = 'administrator';
-    console.log('✅ Test 12 Passed.');
 
     console.log('\n🎉 ALL PHASE 2 GROUP-LINKING TESTS PASSED SUCCESSFULLY! 🎉');
 

@@ -27,6 +27,8 @@ The Phase 5 adversarial review surfaced three related problems in `scripts/`:
    `app/api/webhooks/telegram/[entitySlug]/route` (deleted in Phase 3), and
    `test-manifest-normalization.ts` calls `getContextManifest` with its pre-Phase-4 two-argument
    signature. Both would crash at startup; neither produced a compile error anywhere.
+   *(Validation of this item: the Item D typecheck, once implemented, immediately surfaced a
+   third — `test-group-linking.ts` also imports the retired route. See §2b.)*
 3. **No written convention** stopping the next harness from reintroducing either problem.
 
 ---
@@ -71,6 +73,48 @@ only.
 **Acceptance:** the script runs green end-to-end
 (`node --env-file=.env.local node_modules/tsx/dist/cli.mjs scripts/test-management-rls.ts`), and
 `grep -r "webhooks/telegram" scripts/` returns nothing.
+
+---
+
+## 2b. Item B2 — Repair `scripts/test-group-linking.ts` (keep the linking coverage)
+
+Discovered by the Item D typecheck after this spec was first written: this harness also imports
+the retired per-entity route. **Repair, do not prune** — Test Cases 1–11 are pure SQL-level
+adversarial coverage of `mint_link_token`, `consume_link_token`, and `list_entity_groups`, all
+three of which remain live SECURITY DEFINER functions in production. `consume_link_token` is
+exactly what the current platform route calls (via `consumeLinkToken`, with the null
+expected-entity signature Test 9 covers). The replay, concurrent-race, takeover-protection,
+idempotent-rebind, expiry, and forum-gate cases exist nowhere else.
+
+**Remove only the dead webhook portion:**
+
+- Test Case 12 ("Admin-Gate Webhook Handler Integration") in its entirety.
+- The import of `POST` from `../app/api/webhooks/telegram/[entitySlug]/route` and the
+  `NextRequest` import.
+- The global `fetch` mock and the Vercel `waitUntil` request-context mock (verify Tests 1–11 do
+  not use them — they should not; they are SQL-only).
+
+**Keep** the startup migration re-apply: `20260628000000_group_linking.sql` was verified fully
+idempotent (`add column if not exists` / `create or replace function` throughout), so it is
+rule-5 compliant.
+
+**Port Test 12's intent to the platform route (bounded exception to "no new tests").** The
+non-admin `/auth` rejection is a genuine security gate: `consume_link_token` itself does NOT
+check group-admin status (it is `bot_service`-gated only) — the route's `getChatMember` check is
+the sole enforcement that only group admins can link a chat, and Test 12 was its only coverage
+(`test-bot-cutover.ts` exercises only the admin-succeeds path). Replace Test 12 with an
+equivalent case against `app/api/webhooks/platform/[botSlug]/route`, using the fixture pattern
+from `test-bot-cutover.ts` Test 7 (seed a `bots` row + Vault secrets + `bot_entities` link; set
+`mockChatMemberStatus = 'member'`; POST `/auth <code>`; assert the `'Not admin'` response, token
+NOT consumed, and no `groups` row created). This may live either as the new Test 12 in this
+harness (with the necessary bot fixtures added to setup/teardown) or as an added non-admin case
+in `test-bot-cutover.ts` — implementer's choice; whichever requires the smaller diff. No other
+new test authoring is licensed by this exception.
+
+**Acceptance:** the script runs green end-to-end
+(`node --env-file=.env.local node_modules/tsx/dist/cli.mjs scripts/test-group-linking.ts`);
+Test Cases 1–11 are intact and un-renumbered; the ported non-admin route-level case exists and
+passes; the §2 grep audit still returns nothing.
 
 ---
 
@@ -164,20 +208,25 @@ are the reference example.
 1. `scripts/test-manifest-normalization.ts` no longer exists.
 2. `scripts/test-management-rls.ts` runs green end-to-end; contains no reference to
    `webhooks/telegram`; retained coverage (Test Cases 1–9, 11) is intact and un-renumbered.
-3. `scripts/test-bot-cutover.ts` runs green end-to-end, unmodified or with a minimal listed diff.
-4. `scripts/test-model-call-logging.ts` and `scripts/test-group-scoped-context.ts` still run green
-   (regression check — Item D's config must not break them).
-5. `npm run check:scripts` passes; a deliberately broken import fails it (verified, then reverted).
-6. `npm run build` passes with unchanged output.
-7. `AGENTS.md` contains the seven test-harness safety rules.
+3. `scripts/test-group-linking.ts` runs green end-to-end; Test Cases 1–11 intact and
+   un-renumbered; the ported platform-route non-admin `/auth` case exists and passes;
+   `grep -r "webhooks/telegram" scripts/` returns nothing.
+4. `scripts/test-bot-cutover.ts` runs green end-to-end, unmodified or with a minimal listed diff.
+5. `scripts/test-model-call-logging.ts` and `scripts/test-group-scoped-context.ts` still run green
+   (regression check — Item D's config must not break them). `scripts/test-html-sanitizer.ts`
+   and `scripts/sync-commands.ts` typecheck under Item D (they need no repair — the sanitizer is
+   a pure unit test and the sync script is a utility with its own spec).
+6. `npm run check:scripts` passes; a deliberately broken import fails it (verified, then reverted).
+7. `npm run build` passes with unchanged output.
+8. `AGENTS.md` contains the seven test-harness safety rules.
 
 ---
 
 ## 8. Handoff notes for Antigravity
 
-- **Order of work:** Item D first (the typecheck will enumerate exactly what Item B must remove
-  and whether Item C needs anything), then A (delete), B (surgical repair), C (verify-run), E
-  (docs). Run the full acceptance checklist last.
+- **Order of work:** Item D first (the typecheck will enumerate exactly what Items B and B2 must
+  remove and whether Item C needs anything), then A (delete), B and B2 (surgical repairs), C
+  (verify-run), E (docs). Run the full acceptance checklist last.
 - **Scope discipline:** this is a hygiene pass. No feature work, no refactors of passing code, no
   runtime changes. If the typecheck surfaces something ambiguous outside `scripts/`, stop and
   report rather than fixing.

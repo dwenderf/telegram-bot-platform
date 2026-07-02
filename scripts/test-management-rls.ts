@@ -4,44 +4,8 @@
 // Set a dummy ANTHROPIC_API_KEY so no real key is ever needed
 process.env.ANTHROPIC_API_KEY = 'dummy-test-key';
 
-// Mock Vercel request context to capture waitUntil promises
-const pendingPromises: Promise<any>[] = [];
-(globalThis as any)[Symbol.for("@vercel/request-context") as any] = {
-  get() {
-    return {
-      waitUntil(promise: Promise<any>) {
-        pendingPromises.push(promise);
-      }
-    };
-  }
-};
-
 import postgres from 'postgres';
 import assert from 'assert';
-import { POST } from '../app/api/webhooks/telegram/[entitySlug]/route';
-import { NextRequest } from 'next/server';
-import { setMockCallModel } from '../lib/anthropic';
-
-// Stub model call directly
-setMockCallModel(async () => {
-  return {
-    text: 'This is a mock answer grounded in test docs.',
-    usage: { input_tokens: 100, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0 },
-    model: 'claude-3-5-sonnet-20241022',
-    requestId: 'req-123',
-    stopReason: 'end_turn',
-  };
-});
-
-// Mock global fetch to intercept outbound Telegram API requests
-const originalFetch = global.fetch;
-global.fetch = (async (url: any, options: any) => {
-  const urlStr = url.toString();
-  if (urlStr.includes('api.telegram.org')) {
-    return new Response(JSON.stringify({ ok: true, result: { message_id: 12345 } }), { status: 200 });
-  }
-  return originalFetch(url, options);
-}) as any;
 
 // Helper to run query as a simulated authenticated Supabase user
 async function runAsUser<T>(
@@ -148,17 +112,6 @@ async function main() {
               values (${E1}, ${ADMIN_U1}, 'admin', 'active', ${USER_A})`;
     await sql`insert into public.authorizations (entity_id, profile_id, role, status, granted_by)
               values (${E1}, ${VIEWER_U2}, 'viewer', 'active', ${USER_A})`;
-
-    // 4. Create group & context cache (for webhook grounding validation)
-    await sql`insert into public.groups (entity_id, telegram_chat_id, display_name)
-              values (${E1}, 999001, 'Test Group')`;
-    const grp = await sql<{ id: string }[]>`select id from public.groups where telegram_chat_id = 999001`;
-    const G1 = grp[0].id;
-
-    await sql`insert into public.doc_cache (entity_id, doc_path, content)
-              values (${E1}, 'general.md', 'Mock grounded content: KenntnisBot is an AI assistant.')`;
-    await sql`insert into public.manifest_entries (entity_id, group_id, doc_path)
-              values (${E1}, ${G1}, 'general.md')`;
 
     console.log('Setup completed. Running tests...\n');
 
@@ -455,56 +408,7 @@ async function main() {
 
     console.log('✅ Test Case 9 Passed.');
 
-    // =========================================================================
-    // Test Case 10: Webhook Golden Path & Isolation
-    // =========================================================================
-    console.log('Running Test Case 10: Webhook golden path & isolation...');
 
-    // 10a: Execute webhook under bot_service credentials using fetch mock
-    const req = new NextRequest(`http://localhost:3000/api/webhooks/telegram/entity-1-test`, {
-      method: 'POST',
-      headers: {
-        'x-telegram-bot-api-secret-token': 'mock-webhook-secret',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        update_id: 1234567,
-        message: {
-          message_id: 9991,
-          chat: { id: 999001, type: 'supergroup' },
-          from: { id: 88888, username: 'testuser' },
-          text: '/ask hello',
-        },
-      }),
-    });
-
-    pendingPromises.length = 0;
-    const res = await POST(req, { params: Promise.resolve({ entitySlug: 'entity-1-test' }) });
-    const resJson = await res.json();
-    console.log('Webhook Response JSON:', resJson);
-    assert.strictEqual(res.status, 200, 'Test 10a Failed: Webhook should return 200 OK');
-
-    // Await all waitUntil promises deterministically
-    await Promise.all(pendingPromises);
-
-    // Verify response was logged in message_log table
-    const botLogs = await sql`
-      select message_text, is_bot_response
-      from public.message_log
-      where entity_id = ${E1} and is_bot_response = true
-      order by id desc limit 1
-    `;
-    assert.strictEqual(botLogs.length, 1, 'Test 10a Failed: Bot response was not logged');
-    assert.strictEqual(botLogs[0].message_text, 'This is a mock answer grounded in test docs.', 'Test 10a Failed: Incorrect logged bot response text');
-
-    // 10b: Webhook isolation verification.
-    // The webhook route runs database queries strictly under the connection pool using the credentials in DATABASE_URL.
-    // Since Test 9 proves that this DATABASE_URL role ('bot_service') throws a 42501 on every new management table,
-    // the fact that Test 10a completed successfully with 200 OK proves that the webhook executed successfully without
-    // attempting any query access to the management-plane tables (any attempt would have thrown 42501 and failed the execution).
-    assert.ok(process.env.DATABASE_URL!.includes('bot_service'), 'Test 10b Failed: DATABASE_URL does not connect as bot_service');
-
-    console.log('✅ Test Case 10 Passed.');
 
     // =========================================================================
     // Test Case 11: Default Deny

@@ -71,7 +71,7 @@ async function main() {
 
   // Mock Vercel request context to capture waitUntil promises
   const pendingPromises: Promise<any>[] = [];
-  globalThis[Symbol.for("@vercel/request-context") as any] = {
+  (globalThis as any)[Symbol.for("@vercel/request-context")] = {
     get() {
       return {
         waitUntil(promise: Promise<any>) {

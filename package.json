@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "check:scripts": "tsc --noEmit -p tsconfig.scripts.json"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.2",

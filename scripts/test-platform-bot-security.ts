@@ -1,5 +1,5 @@
-// Adversarial Test Suite for Phase 3 Bot Cutover
-// Run with: node --env-file=.env.local node_modules/tsx/dist/cli.mjs scripts/test-bot-cutover.ts
+// Adversarial Test Suite for Platform Bot Security & Cutover
+// Run with: node --env-file=.env.local node_modules/tsx/dist/cli.mjs scripts/test-platform-bot-security.ts
 
 process.env.ANTHROPIC_API_KEY = 'dummy-test-key';
 
@@ -68,6 +68,7 @@ async function main() {
   let secretA1: string | null = null;
   let secretA2: string | null = null;
   let secretB1: string | null = null;
+  let hasFailed = false;
 
   try {
     if (!adminUrl || !botUrl) {
@@ -231,7 +232,7 @@ async function main() {
 
     // Mock Vercel request context to capture waitUntil promises
     const pendingPromises: Promise<any>[] = [];
-    globalThis[Symbol.for("@vercel/request-context") as any] = {
+    (globalThis as any)[Symbol.for("@vercel/request-context")] = {
       get() {
         return {
           waitUntil(promise: Promise<any>) {
@@ -353,6 +354,65 @@ async function main() {
     assert.strictEqual(logE1_supergroup[0].entity_id, E1, 'Test 7 Follow-up Failed: Wrong entity_id in log');
 
     console.log('✅ Test 7 Passed.');
+
+    // =========================================================================
+    // Test Case 7b: Non-admin /auth attempt is rejected (gating check)
+    // =========================================================================
+    console.log('Test 7b: Non-admin /auth attempt is rejected...');
+    // Mint a new code for E1
+    const codeE1_nonadmin = await sql.begin(async (tx) => {
+      await tx`set local role = 'authenticated'`;
+      await tx`select set_config('request.jwt.claims', ${JSON.stringify({ sub: USER_A, email: 'owner_a@test.com' })}, true)`;
+      await tx`set local row_security = on`;
+      const res = await tx<{ mint_link_token: string }[]>`select public.mint_link_token(${E1})`;
+      return res[0].mint_link_token;
+    });
+
+    // Mock non-admin user status
+    mockChatMemberStatus = 'member';
+    sentMessages = [];
+    pendingPromises.length = 0;
+
+    const req7b = new NextRequest('http://localhost:3000/api/webhooks/platform/bot-a-slug', {
+      method: 'POST',
+      headers: {
+        'x-telegram-bot-api-secret-token': 'webhook-secret-for-bot-a',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        update_id: 1000009,
+        message: {
+          message_id: 2009,
+          chat: { id: -1001928374830, type: 'supergroup', is_forum: true, title: 'Chat 4' },
+          from: { id: 7777, username: 'nonadmin_tester' },
+          text: `/auth ${codeE1_nonadmin}`,
+        },
+      }),
+    });
+
+    const res7b = await POST(req7b, { params: Promise.resolve({ botSlug: 'bot-a-slug' }) });
+    const res7bJson = await res7b.json();
+    assert.strictEqual(res7b.status, 200);
+    assert.strictEqual(res7bJson.msg, 'Not admin', 'Test 7b Failed: Expected Not admin msg response');
+
+    await Promise.all(pendingPromises);
+
+    // Verify token was NOT consumed
+    const tokenCheck7b = await sql`
+      select consumed_at from public.link_tokens 
+      where token_hash = encode(sha256(${codeE1_nonadmin}::bytea), 'hex')
+    `;
+    assert.strictEqual(tokenCheck7b[0].consumed_at, null, 'Test 7b Failed: Token was consumed by non-admin');
+
+    // Verify no groups row was created for chat -1001928374830
+    const groupCheck7b = await sql`
+      select * from public.groups where telegram_chat_id = -1001928374830
+    `;
+    assert.strictEqual(groupCheck7b.length, 0, 'Test 7b Failed: Group row was created for non-admin request');
+
+    // Restore administrator status
+    mockChatMemberStatus = 'administrator';
+    console.log('✅ Test 7b Passed.');
 
     // Test Case 8: Cross-entity correctness (Minor)
     console.log('Test 8: Cross-entity correctness (same platform bot resolves different entities)...');
@@ -545,6 +605,7 @@ async function main() {
     console.log('Test 12: Model/persona plumbing is a no-op when null...');
     // We already invoked Bot A above. Bot A has null persona and model in the database.
     // Let's assert that model fallback to default is logged correctly in generationMetadata
+    await Promise.all(pendingPromises);
     const defaultModelRow = await sql`
       select generation_metadata from public.message_log 
       where telegram_chat_id = 888001 and is_bot_response = true
@@ -557,12 +618,12 @@ async function main() {
     );
     console.log('✅ Test 12 Passed.');
 
-    console.log('\n🎉 ALL BOT CUTOVER HARNESS TESTS PASSED SUCCESSFULLY! 🎉');
+    console.log('\n🎉 ALL PLATFORM BOT SECURITY HARNESS TESTS PASSED SUCCESSFULLY! 🎉');
 
   } catch (error) {
     console.error('\n❌ Verification Failed:');
     console.error(error);
-    process.exit(1);
+    hasFailed = true;
   } finally {
     console.log('\n--- Cleaning Up Test Environment ---');
     if (sql) {
@@ -588,6 +649,7 @@ async function main() {
         console.warn('Bot sql close failed:', e);
       }
     }
+    process.exit(hasFailed ? 1 : 0);
   }
 }
 
