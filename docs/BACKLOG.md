@@ -155,6 +155,23 @@ the enabling seam for the whole open-connector direction (`docs/VISION.md` Surfa
 ahead of the content UI** — just build the content UI *through* a clean boundary when that work
 happens.
 
+> **Enforce entity-consistency at write time (the boundary's one real safety check).** Today, cross-
+> entity isolation on doc resolution is enforced *only at read time* — `buildContext`/`getContextManifest`
+> filter `where m.entity_id = ${entityId}`, so a `manifest_entries` row pointing at another entity's
+> `doc_id` simply doesn't resolve (verified live: it produces "no doc," never a cross-tenant leak — the
+> safe failure mode). But **nothing prevents *writing* such a row** — there's no FK/constraint saying a
+> manifest row's `doc_id` must belong to the manifest's `entity_id`. In the **web UI** this is a
+> non-issue (a user only ever sees their own entity's docs to link). The real exposure is the
+> **API / external-write path** (a connector or external caller sending `entity_id` + `doc_id`
+> directly): a caller could link another entity's doc — by mistake, or as a cross-tenant probe. The
+> read filter still blocks the *read*, but the write should be rejected at the boundary so the caller
+> gets a clear "that document isn't yours" error rather than silently creating a dead mapping. **So when
+> the ingestion boundary is built, it must validate that `doc_id`'s entity matches the target
+> `entity_id` before writing.** The safety currently lives in the resolver; the write API must not
+> assume it — it must add its own check. (Defense-in-depth option, if ever wanted: a DB-level
+> constraint enforcing manifest↔doc entity-consistency — but the write-boundary check is the primary,
+> sufficient guard.)
+
 ---
 
 ## Open — non-security polish
