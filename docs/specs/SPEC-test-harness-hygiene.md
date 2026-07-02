@@ -128,8 +128,20 @@ heading like **"Test-harness safety rules"**:
 5. Harnesses may re-apply a migration file only if that migration is idempotent
    (`if not exists` / `create or replace` / `drop policy if exists` throughout).
 6. New or modified test scripts must pass `npm run check:scripts`.
+7. Harness-applied migrations bypass the Supabase migration ledger
+   (`supabase_migrations.schema_migrations`): `sql.unsafe(migrationSql)` executes DDL against the
+   real database without recording it, so `supabase migration list` will show the migration as
+   missing on remote even though the schema exists. Migrations reach the remote database only via
+   `supabase db push`, run by the operator **before** the harness's first execution — the harness
+   re-apply is a convenience no-op for repeat runs, never the deployment mechanism. If a harness
+   has applied a migration ahead of push, reconcile with `supabase db push` (safe because rule 5
+   requires harness-applied migrations to be idempotent; the `already exists, skipping` notices
+   double as an idempotency proof) and verify with `supabase migration list`.
+   `supabase migration repair --status applied <version>` is the fallback only if the migration
+   somehow is not idempotent.
 
-Rules 3–5 codify what `test-model-call-logging.ts` now does; it is the reference example.
+Rules 3–5 and 7 codify what `test-model-call-logging.ts` and the Phase 5 deployment now do; they
+are the reference example.
 
 ---
 
@@ -157,7 +169,7 @@ Rules 3–5 codify what `test-model-call-logging.ts` now does; it is the referen
    (regression check — Item D's config must not break them).
 5. `npm run check:scripts` passes; a deliberately broken import fails it (verified, then reverted).
 6. `npm run build` passes with unchanged output.
-7. `AGENTS.md` contains the six test-harness safety rules.
+7. `AGENTS.md` contains the seven test-harness safety rules.
 
 ---
 
