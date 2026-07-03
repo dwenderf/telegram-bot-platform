@@ -381,7 +381,8 @@ export async function updateLoggedMessage(input: {
   return await withTenantContext(input.entityId, async (tx) => {
     const result = await tx`
       update public.message_log
-      set message_text = ${input.newText}
+      set message_text = ${input.newText},
+          updated_at = now()
       where group_id = ${input.groupId}
         and telegram_chat_id = ${chatIdStr}
         and telegram_message_id = ${messageIdStr}::bigint

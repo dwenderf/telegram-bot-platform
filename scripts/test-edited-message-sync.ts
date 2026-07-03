@@ -48,6 +48,11 @@ async function main() {
     const migrationSql = fs.readFileSync(migrationPath, 'utf8');
     await sql.unsafe(migrationSql);
 
+    console.log('--- Applying Migration 20260703020000_message_log_updated_at.sql ---');
+    const migrationPath2 = path.join(__dirname, '../supabase/migrations/20260703020000_message_log_updated_at.sql');
+    const migrationSql2 = fs.readFileSync(migrationPath2, 'utf8');
+    await sql.unsafe(migrationSql2);
+
     console.log('--- Cleaning Up Stale Test State ---');
     await sql`delete from public.message_log where entity_id = ${E1}`;
     await sql`delete from public.groups where entity_id = ${E1}`;
@@ -63,7 +68,7 @@ async function main() {
     // =========================================================================
     // Test 1: message_id is successfully stored
     // =========================================================================
-    console.log('Test 1: Verifying telegram_message_id is stored...');
+    console.log('Test 1: Verifying telegram_message_id is stored and updated_at is NULL on insert...');
     await logMessage({
       entityId: E1,
       groupId: GROUP_A,
@@ -77,15 +82,33 @@ async function main() {
       telegramMessageId: 9001,
     });
 
+    // Seed a second message that we will never edit
+    await logMessage({
+      entityId: E1,
+      groupId: GROUP_A,
+      telegramChatId: CHAT_A,
+      telegramThreadId: 42,
+      telegramUserId: 123,
+      username: 'tester',
+      messageText: 'untouched message content',
+      isCommand: false,
+      isBotMention: false,
+      telegramMessageId: 9003,
+    });
+
     const rows1 = await sql`select * from public.message_log where entity_id = ${E1} and telegram_message_id = 9001`;
     assert.strictEqual(rows1.length, 1, 'Should have stored exactly 1 row with message_id 9001');
     assert.strictEqual(rows1[0].message_text, 'original message content');
+    assert.strictEqual(rows1[0].updated_at, null, 'updated_at must be NULL on insert');
+
+    const rowsUnedited1 = await sql`select * from public.message_log where entity_id = ${E1} and telegram_message_id = 9003`;
+    assert.strictEqual(rowsUnedited1[0].updated_at, null, 'updated_at of untouched message must be NULL');
     console.log('✅ Test 1 Passed.');
 
     // =========================================================================
     // Test 2: Edit updates in place
     // =========================================================================
-    console.log('Test 2: Verifying updateLoggedMessage updates the same row in-place...');
+    console.log('Test 2: Verifying updateLoggedMessage updates in-place and sets updated_at...');
     const originalRowId = rows1[0].id;
 
     const updated = await updateLoggedMessage({
@@ -101,6 +124,10 @@ async function main() {
     assert.strictEqual(rows2.length, 1, 'Only one row should exist with message_id 9001');
     assert.strictEqual(rows2[0].id, originalRowId, 'The row ID must remain the same (in-place update)');
     assert.strictEqual(rows2[0].message_text, 'edited message content', 'Text must reflect the edit');
+    assert.ok(rows2[0].updated_at !== null, 'updated_at must NOT be NULL after edit');
+
+    const rowsUnedited2 = await sql`select * from public.message_log where entity_id = ${E1} and telegram_message_id = 9003`;
+    assert.strictEqual(rowsUnedited2[0].updated_at, null, 'updated_at of untouched message must remain NULL');
     console.log('✅ Test 2 Passed.');
 
     // =========================================================================
