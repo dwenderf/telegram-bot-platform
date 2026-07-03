@@ -329,10 +329,12 @@ export async function logMessage(input: {
   messageText: string;
   isCommand: boolean;
   isBotMention: boolean;
+  telegramMessageId?: bigint | number | string | null;
 }): Promise<void> {
   const chatIdStr = input.telegramChatId.toString();
   const threadIdStr = input.telegramThreadId !== null && input.telegramThreadId !== undefined ? input.telegramThreadId.toString() : null;
   const userIdStr = input.telegramUserId !== null && input.telegramUserId !== undefined ? input.telegramUserId.toString() : null;
+  const messageIdStr = input.telegramMessageId !== null && input.telegramMessageId !== undefined ? input.telegramMessageId.toString() : null;
 
   await withTenantContext(input.entityId, async (tx) => {
     await tx`
@@ -345,7 +347,8 @@ export async function logMessage(input: {
         username,
         message_text,
         is_command,
-        is_bot_mention
+        is_bot_mention,
+        telegram_message_id
       ) values (
         ${input.entityId},
         ${input.groupId},
@@ -355,9 +358,36 @@ export async function logMessage(input: {
         ${input.username},
         ${input.messageText},
         ${input.isCommand},
-        ${input.isBotMention}
+        ${input.isBotMention},
+        ${messageIdStr}::bigint
       )
     `;
+  });
+}
+
+/**
+ * Update a logged message in place when edited by the user.
+ */
+export async function updateLoggedMessage(input: {
+  entityId: string;
+  groupId: string;
+  telegramChatId: bigint | number | string;
+  telegramMessageId: bigint | number | string;
+  newText: string;
+}): Promise<boolean> {
+  const chatIdStr = input.telegramChatId.toString();
+  const messageIdStr = input.telegramMessageId.toString();
+
+  return await withTenantContext(input.entityId, async (tx) => {
+    const result = await tx`
+      update public.message_log
+      set message_text = ${input.newText}
+      where group_id = ${input.groupId}
+        and telegram_chat_id = ${chatIdStr}
+        and telegram_message_id = ${messageIdStr}::bigint
+        and is_bot_response = false
+    `;
+    return result.count > 0;
   });
 }
 

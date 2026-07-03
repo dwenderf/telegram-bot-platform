@@ -11,6 +11,7 @@ import {
   consumeLinkToken,
   resolveBotIdBySlug,
   resolveEntityIdByChat,
+  updateLoggedMessage,
 } from '@/lib/capabilities';
 import {
   setMessageReaction,
@@ -92,6 +93,46 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     }
 
     const message = update.message;
+    const editedMessage = update.edited_message;
+
+    // Handle edited messages (Item 2.1)
+    if (editedMessage && editedMessage.chat && editedMessage.text) {
+      const entityId = await resolveEntityIdByChat(editedMessage.chat.id);
+      if (entityId) {
+        const entityInfo = await withTenantContext(entityId, async (tx) => {
+          const rows = await tx<any[]>`
+            select excluded_thread_ids from public.entities where id = ${entityId}
+          `;
+          return rows[0];
+        });
+        const threadId = editedMessage.message_thread_id !== undefined ? editedMessage.message_thread_id : null;
+        const isExcluded = threadId !== null &&
+          entityInfo?.excluded_thread_ids &&
+          entityInfo.excluded_thread_ids.some(
+            (id: any) => id.toString() === threadId.toString()
+          );
+
+        if (!isExcluded) {
+          const groupRow = await withTenantContext(entityId, async (tx) => {
+            const rows = await tx<any[]>`
+              select id from public.groups where telegram_chat_id = ${editedMessage.chat.id.toString()}
+            `;
+            return rows[0];
+          });
+          if (groupRow) {
+            await updateLoggedMessage({
+              entityId,
+              groupId: groupRow.id,
+              telegramChatId: editedMessage.chat.id,
+              telegramMessageId: editedMessage.message_id,
+              newText: editedMessage.text.trim(),
+            });
+          }
+        }
+      }
+      return NextResponse.json({ ok: true, msg: 'Edit synced' });
+    }
+
     if (!message || !message.chat || !message.text) {
       return NextResponse.json({ ok: true });
     }
@@ -222,6 +263,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               messageText: text,
               isCommand: true,
               isBotMention: false,
+              telegramMessageId: message.message_id,
             });
           }
         } catch (err) {
@@ -411,6 +453,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       messageText: text,
       isCommand,
       isBotMention,
+      telegramMessageId: message.message_id,
     });
 
     // 11. Respond to /help
