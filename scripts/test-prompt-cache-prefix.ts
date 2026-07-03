@@ -7,7 +7,6 @@ import fs from 'fs';
 import path from 'path';
 import { setMockCallModel, CallModelInput, CallModelResult } from '../lib/anthropic';
 import { answerQuestion } from '../lib/capabilities';
-import { validateConfig, getModelIdentifier } from '../lib/config';
 
 async function main() {
   const adminUrl = process.env.ADMIN_DATABASE_URL;
@@ -16,6 +15,7 @@ async function main() {
   let sql: postgres.Sql | null = null;
   let botSql: postgres.Sql | null = null;
 
+  // Values must sort in suffix order — test-prompt-cache-prefix depends on it
   const USER_A = 'aa300000-0000-0000-0000-000000000000';
   const E1 = 'eb300000-0000-0000-0000-000000000001';
   const GROUP_A = 'fb300000-0000-0000-0000-000000000000';
@@ -65,12 +65,15 @@ async function main() {
     await sql`insert into public.threads (entity_id, group_id, telegram_thread_id) values (${E1}, ${GROUP_A}, 42)`;
 
     // Seed doc context
-    await sql`insert into public.doc_cache (id, entity_id, display_name, content) values
-  (${DOC_ID_1}, ${E1}, 'test-a.md', 'Mock grounded doc content: KenntnisBot is awesome.'),
-  (${DOC_ID_2}, ${E1}, 'test-b.md', 'Second doc content: platform bot is leguan.')`;
-    await sql`insert into public.manifest_entries (entity_id, group_id, doc_id) values
-  (${E1}, ${GROUP_A}, ${DOC_ID_1}),
-  (${E1}, ${GROUP_A}, ${DOC_ID_2})`;
+    await sql`insert into public.doc_cache (id, entity_id, display_name, content)
+              values (${DOC_ID_1}, ${E1}, 'b_test.md', 'First doc content')`;
+    await sql`insert into public.manifest_entries (entity_id, group_id, doc_id)
+              values (${E1}, ${GROUP_A}, ${DOC_ID_1})`;
+
+    await sql`insert into public.doc_cache (id, entity_id, display_name, content)
+              values (${DOC_ID_2}, ${E1}, 'a_test.md', 'Second doc content')`;
+    await sql`insert into public.manifest_entries (entity_id, group_id, doc_id)
+              values (${E1}, ${GROUP_A}, ${DOC_ID_2})`;
 
     // Seed initial message_log
     await sql`insert into public.message_log (entity_id, group_id, telegram_chat_id, telegram_thread_id, username, message_text, is_bot_response)
@@ -100,7 +103,15 @@ async function main() {
 
     assert.strictEqual(capturedCalls.length, 1);
     const call1 = capturedCalls[0];
-    assert.ok(call1.systemPrompt.includes('Mock grounded doc content: KenntnisBot is awesome.'), 'systemPrompt should contain doc context');
+    assert.ok(call1.systemPrompt.includes('First doc content'), 'systemPrompt should contain doc 1 context');
+    assert.ok(call1.systemPrompt.includes('Second doc content'), 'systemPrompt should contain doc 2 context');
+
+    // Assert deterministic order by doc_id (DOC_ID_1 precedes DOC_ID_2)
+    const doc1Index = call1.systemPrompt.indexOf('b_test.md');
+    const doc2Index = call1.systemPrompt.indexOf('a_test.md');
+    assert.ok(doc1Index !== -1 && doc2Index !== -1, 'Expected both docs in systemPrompt');
+    assert.ok(doc1Index < doc2Index, 'Expected doc b_test.md (DOC_ID_1) to precede doc a_test.md (DOC_ID_2) in systemPrompt');
+
     assert.ok(!call1.systemPrompt.includes('message 1'), 'systemPrompt should NOT contain history');
     console.log('✅ Test 1 Passed.');
 
@@ -197,7 +208,6 @@ async function main() {
     delete process.env.MODEL_IDENTIFIER;
 
     // Clear validation status
-    const configModule = require('../lib/config');
     // Reset private validation flag by reloading/re-requiring config or deleting cached require
     delete require.cache[require.resolve('../lib/config')];
     const reloadedConfig = require('../lib/config');
