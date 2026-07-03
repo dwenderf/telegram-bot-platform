@@ -533,6 +533,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               groupId: group.id,
               threadId,
               limit: requested,
+              botId,
             });
 
             const prefix = note ? `<i>${escapeHtml(note)}</i>\n\n` : '';
@@ -605,6 +606,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               question: question,
               model: bot.model,
               persona: bot.persona,
+              botId,
             });
 
             const sanitizedAnswer = sanitizeForTelegramHtml(answerText);

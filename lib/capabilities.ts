@@ -263,6 +263,7 @@ export async function answerQuestion(input: {
   question: string;
   model?: string | null;
   persona?: string | null;
+  botId?: string | null;
 }): Promise<{ answerText: string }> {
   // Load the project documentation and recent transcript context
   const { contextDocs, recentConversation } = await buildContext(
@@ -305,6 +306,7 @@ ${input.question}`;
     entityId: input.entityId,
     groupId: input.groupId,
     threadId: input.threadId,
+    botId: input.botId,
     callType: 'answer',
     result,
   });
@@ -409,6 +411,7 @@ export async function recapConversation(input: {
   groupId: string;
   threadId: bigint | number | string | null;
   limit: number;
+  botId?: string | null;
 }): Promise<{ recapText: string }> {
   const threadIdStr =
     input.threadId !== null && input.threadId !== undefined ? input.threadId.toString() : null;
@@ -460,6 +463,7 @@ Guidelines:
     entityId: input.entityId,
     groupId: input.groupId,
     threadId: input.threadId,
+    botId: input.botId,
     callType: 'recap',
     result,
   });

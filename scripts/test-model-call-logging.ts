@@ -71,8 +71,9 @@ async function main() {
     await sql`delete from public.entities where id in (${E1}, ${E2})`;
     await sql`delete from auth.users where id = ${USER_A}`;
 
-    // Create user & entities
+    // Create user, bots & entities
     await sql`insert into auth.users (id, email, email_confirmed_at, aud, role) values (${USER_A}, 'owner_phase5@test.com', now(), 'authenticated', 'authenticated')`;
+    await sql`insert into public.bots (id, name, slug, telegram_username, token_secret_ref, webhook_secret_ref, status) values (${BOT_A}, 'Phase 5 Bot', 'phase5_bot_slug', 'phase5_bot_uname', 'token-id-a', 'secret-id-a', 'active')`;
     await sql`insert into public.entities (id, slug, display_name, owner_profile_id, telegram_bot_username) values (${E1}, 'entity-phase5-e1', 'Phase 5 Entity 1', ${USER_A}, 'phase5_bot')`;
     await sql`insert into public.entities (id, slug, display_name, owner_profile_id, telegram_bot_username) values (${E2}, 'entity-phase5-e2', 'Phase 5 Entity 2', ${USER_A}, 'phase5_bot_2')`;
 
@@ -96,23 +97,41 @@ async function main() {
       groupId: GROUP_A,
       threadId: 42,
       question: 'Testing model usage logging',
+      botId: BOT_A,
     });
     assert.strictEqual(answerText, 'This is a mock response.');
 
     // Query ledger directly
-    const calls1 = await sql`select * from public.model_calls where entity_id = ${E1}`;
-    assert.strictEqual(calls1.length, 1, 'Should have inserted exactly 1 ledger row');
+    const calls1 = await sql`select * from public.model_calls where entity_id = ${E1} and bot_id = ${BOT_A}`;
+    assert.strictEqual(calls1.length, 1, 'Should have inserted exactly 1 ledger row with bot_id');
     assert.strictEqual(calls1[0].call_type, 'answer');
     assert.strictEqual(calls1[0].input_tokens, 150);
     assert.strictEqual(calls1[0].output_tokens, 75);
     assert.strictEqual(calls1[0].model, 'claude-3-5-sonnet-20241022');
     assert.strictEqual(calls1[0].group_id, GROUP_A);
     assert.strictEqual(calls1[0].thread_id, threadUuid);
+    assert.strictEqual(calls1[0].bot_id, BOT_A);
     assert.strictEqual(calls1[0].provider, 'anthropic');
     assert.strictEqual(calls1[0].metadata.requestId, 'req-123');
     assert.strictEqual(calls1[0].metadata.stopReason, 'end_turn');
     assert.strictEqual(calls1[0].metadata.telegramThreadId, 42);
     console.log('✅ Test 1 Passed.');
+
+    // =========================================================================
+    // Test 1b: Null-safety check (missing botId logs NULL and succeeds)
+    // =========================================================================
+    console.log('Test 1b: Verifying answerQuestion is null-safe when botId is absent...');
+    await answerQuestion({
+      entityId: E1,
+      groupId: GROUP_A,
+      threadId: 42,
+      question: 'Testing null-safety',
+      // botId is omitted
+    });
+
+    const calls1b = await sql`select * from public.model_calls where entity_id = ${E1} and bot_id is null`;
+    assert.strictEqual(calls1b.length, 1, 'Should have logged a row with NULL bot_id');
+    console.log('✅ Test 1b Passed.');
 
     // =========================================================================
     // Test 2: Recap path logs a row
@@ -125,12 +144,14 @@ async function main() {
       groupId: GROUP_A,
       threadId: 42,
       limit: 10,
+      botId: BOT_A,
     });
 
-    const calls2 = await sql`select * from public.model_calls where entity_id = ${E1} and call_type = 'recap'`;
+    const calls2 = await sql`select * from public.model_calls where entity_id = ${E1} and call_type = 'recap' and bot_id = ${BOT_A}`;
     assert.strictEqual(calls2.length, 1);
     assert.strictEqual(calls2[0].input_tokens, 220);
     assert.strictEqual(calls2[0].output_tokens, 110);
+    assert.strictEqual(calls2[0].bot_id, BOT_A);
     console.log('✅ Test 2 Passed.');
 
     // =========================================================================
