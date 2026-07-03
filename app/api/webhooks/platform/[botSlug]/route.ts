@@ -68,6 +68,29 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     const update = await req.json();
 
+    // 3b. Archive raw Telegram event (best-effort, non-blocking-on-failure)
+    try {
+      const updateId = update && (typeof update.update_id === 'number' || typeof update.update_id === 'string')
+        ? update.update_id.toString()
+        : null;
+
+      let updateType = 'unknown';
+      if (update && typeof update === 'object') {
+        const keys = Object.keys(update);
+        const typeKey = keys.find((k) => k !== 'update_id');
+        if (typeKey) {
+          updateType = typeKey;
+        }
+      }
+
+      await sql`
+        insert into public.telegram_events (bot_slug, update_id, update_type, payload)
+        values (${botSlug}, ${updateId}, ${updateType}, ${sql.json(update)})
+      `;
+    } catch (err) {
+      console.error('Failed to archive raw Telegram event:', err);
+    }
+
     const message = update.message;
     if (!message || !message.chat || !message.text) {
       return NextResponse.json({ ok: true });

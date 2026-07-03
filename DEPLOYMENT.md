@@ -107,6 +107,35 @@ Apply `supabase/migrations/20260618000000_init_schema.sql`. This creates all tab
 > ```
 > All eight must show **`PERMISSIVE`**. (A permissive policy `using (... = app.current_entity_id)` is still fully tenant-isolating — it grants only the session entity's rows and hides all others. Permissive vs restrictive is fixed at creation, so the fix is drop + recreate.)
 
+## A5b. Raw Telegram Event Archive & Retention
+
+The Raw Telegram Event Archive writes raw updates directly to the `telegram_events` table before tenant resolution. This table is an append-only forensic log.
+
+### A5b.1 Enable `pg_cron` Extension
+Retention of raw Telegram events requires the `pg_cron` extension to run the daily cleanup job.
+
+1. Go to the Supabase Dashboard -> **Database** -> **Extensions**.
+2. Search for `pg_cron` and click the toggle to enable it (or run `create extension if not exists pg_cron;` in the SQL editor as the `postgres` superuser).
+
+### A5b.2 Schedule Retention Cleanup
+To prevent disk exhaustion, schedule the daily batched delete to reap rows older than 30 days. Paste and execute this SQL query inside the Supabase SQL editor:
+
+```sql
+select cron.schedule(
+  'telegram-events-retention',
+  '0 0 * * *',
+  $$ delete from public.telegram_events
+     where id in (
+       select id from public.telegram_events
+       where created_at < now() - interval '30 days'
+       limit 10000
+     ) $$
+);
+```
+
+- **Tunable settings**: The age threshold (`'30 days'`) and batch limit (`10000`) are tunable operational parameters pasted directly in this SQL, not read at runtime.
+- **Throughput ceiling**: The ceiling is `batch limit * runs/day` (10,000 rows/day on a daily schedule). If sustained daily volume approaches this, increase the schedule frequency (e.g. hourly) or transition to partitioning by `created_at` (backlog).
+
 ## A6. Table privileges for `bot_service` (now handled by the migration)
 
 ✅ **No action needed here** — table privileges are granted **inside the migration** (section 5, after the `grant execute` lines): `usage` on schema, `select/insert/update/delete` on all tables, sequence usage, and `alter default privileges` for future tables. So A5 already gave `bot_service` the base privileges it needs.
