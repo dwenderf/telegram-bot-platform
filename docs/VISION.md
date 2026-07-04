@@ -96,6 +96,32 @@ Three distinct extensibility surfaces, each with its own seam already partly in 
   self-service forever. The **submitter** path (register a specialized bot) is curated/manual by
   design at low volume — the human gate is a feature (quality + trust + credential review), borne by
   the submitter, never the consumer.
+- **The mechanism that makes this genuinely open — the `ModelProvider` boundary + `RemoteProvider`.**
+  The model-call path is being abstracted behind a `ModelProvider` interface
+  (`docs/specs/SPEC-model-provider-abstraction.md`): a provider owns its own auth and behavior, while
+  the request contract (`CallModelInput`) carries only *what to ask* — prompt, model, a `cacheable`
+  claim — never credentials. The powerful consequence for the bot store: an external bot's capability
+  can run **entirely on the submitter's own endpoint**, behind a `RemoteProvider` we construct locally
+  around a scoped, short-lived token they mint. From our side it is *still just a `ModelProvider`* — we
+  send a request, get a result, log usage. **We never see, host, or need to understand what runs on
+  their side.** They can layer arbitrary skills — their own model, RAG, tool-using agents, proprietary
+  logic — behind that boundary, and it plugs in without our involvement. *This is the difference
+  between a curated plugin system (we must vet/host every skill — we are the bottleneck) and an actual
+  open ecosystem (others extend the platform through a boundary we control but do not peer behind).*
+  It is the mechanical reason Surface 2 can become open rather than internal.
+- **The same boundary is where trust discipline concentrates (opacity cuts both ways).** Precisely
+  because we can't see what runs on their side, the boundary must be treated as untrusted, with the
+  same rigor as the webhook payload boundary: the endpoint we call is an **SSRF surface** (allow-list,
+  validate, scope, time-out — never let it point our server at arbitrary hosts); the content it
+  *returns* is untrusted and flows back to real users, so it is **data, not instructions**; and *what
+  we send it* — a tenant's private documents reaching a third-party endpoint — is a **data-governance
+  decision**, not merely a technical one. The architecture's job is to keep this boundary crisp:
+  *provider owns auth at construction, the request contract stays credential-free, the `RemoteProvider`
+  treats its handle as untrusted.* Getting that shape right (it is right in the v1 interface) is what
+  keeps **both** the ecosystem upside reachable **and** the downside contained. This also partly
+  dissolves the "deferred custody problem" below: if a submitter mints a scoped token against *their
+  own* account rather than handing us a stored key, we stop being the custodian of their credential
+  for that call. Implementation-discipline record: `BACKLOG.md` `P4`.
 
 ### Surface 3 — The integration layer (MCP / APIs) — the keystone
 *"How do surfaces 1 and 2 become open rather than internal?"*

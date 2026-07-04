@@ -1,5 +1,5 @@
 import { sql, withTenantContext } from './supabase';
-import { callModel, CallModelResult } from './anthropic';
+import { resolveProvider, CallModelResult } from './model';
 import { getModelIdentifier, getContextMessageHistoryLimit } from './config';
 
 export interface Entity {
@@ -206,6 +206,7 @@ async function logModelCall(input: {
   botId?: string | null;
   callType: 'answer' | 'recap';
   result: CallModelResult;
+  providerName: string;
 }): Promise<void> {
   try {
     const threadIdStr = input.threadId !== null && input.threadId !== undefined ? input.threadId.toString() : null;
@@ -234,7 +235,7 @@ async function logModelCall(input: {
           ${input.botId || null}::uuid,
           ${input.callType},
           ${input.result.model},
-          'anthropic',
+          ${input.providerName},
           ${input.result.usage.input_tokens ?? null},
           ${input.result.usage.output_tokens ?? null},
           ${input.result.usage.cache_read_tokens ?? 0},
@@ -296,10 +297,12 @@ ${recentConversation}
 QUESTION:
 ${input.question}`;
 
-  const result = await callModel({
+  const provider = resolveProvider(model);
+  const result = await provider.callModel({
     systemPrompt,
     userMessage,
     model,
+    cacheable: true,
   });
 
   await logModelCall({
@@ -309,6 +312,7 @@ ${input.question}`;
     botId: input.botId,
     callType: 'answer',
     result,
+    providerName: provider.name,
   });
 
   return {
@@ -484,10 +488,12 @@ Guidelines:
 - Attribute notable points to who said them when useful.
 - Be faithful to the transcript; do not invent. If it's short, keep the recap short.`;
 
-  const result = await callModel({
+  const provider = resolveProvider(model);
+  const result = await provider.callModel({
     systemPrompt,
     userMessage: `Recap the last ${input.limit} messages of this conversation:\n\n${transcript}`,
     model,
+    cacheable: false,
   });
 
   await logModelCall({
@@ -497,6 +503,7 @@ Guidelines:
     botId: input.botId,
     callType: 'recap',
     result,
+    providerName: provider.name,
   });
 
   return { recapText: result.text };

@@ -144,6 +144,42 @@ model source), gated via whitelist to authorized entities/groups. **No commerce,
   matters:* a real, scoped first customer for the bot-store foundation, de-risking it before any
   marketplace. See `docs/VISION.md` Surface 2.
 
+### P4 — External/third-party bot model authentication (do when a real external-bot integration exists)
+The `ModelProvider` abstraction (`docs/specs/SPEC-model-provider-abstraction.md`) establishes the
+enabling principle: **a provider owns its authentication at construction; `CallModelInput` describes
+only the request (prompt, model, `cacheable`) and never carries credentials.** That principle must be
+protected as provider auth grows beyond our own static keys.
+- **Two auth models, categorically different.** (1) *Static credentials we hold* — our own bots, our
+  own Anthropic/DeepSeek keys, known at construction (what the v1 provider does today, reading an env
+  var). (2) *Delegated/dynamic auth* — an external bot in the open ecosystem (`P2`, `docs/VISION.md`
+  Surface 2) authenticating against **its own** provider account, via a flow that mints a scoped,
+  short-lived credential rather than a static string we store.
+- **The forward-compatible mental model (bank this, don't build it):** a provider is **constructed from
+  a config record whose credential source can vary** — today "the `ANTHROPIC_API_KEY` env var"; later a
+  **Vault handle** (the pattern already exists: per-tenant Telegram/GitHub secrets resolve via
+  `get_current_entity_secret` — a per-bot model credential would resolve the same way) or a **token
+  from the bot creator's API**. This keeps the future case an *extension*, not a rewrite. Ties to the
+  per-tenant `{ provider, model, optional api_key_ref }` config flagged in `B1` / `PLANNING.md`.
+- **The "creator returns a callable" pattern — right shape, two corrections.** A creator/registry
+  service handing back a ready-to-use provider (rather than a raw key) is good design: the credential
+  stays on the creator's side, so we can't leak/log/store it (a capability-object trust boundary). But
+  across a network boundary you **cannot receive a live interface-conforming object** — only data. So:
+  (a) the creator returns a **scoped, short-lived handle** (endpoint + expiring token) and **we
+  construct a local `RemoteProvider implements ModelProvider`** around it that makes the actual call —
+  "conforms to the interface" is real, but *we* build it locally, not over the wire. (b) The returned
+  reference is **untrusted third-party input** (same suspicion as the webhook payload boundary): an
+  attacker-supplied endpoint your server then calls with credentials in scope is an **SSRF/request-
+  forgery surface**. The `RemoteProvider` must treat the handle as untrusted — allow-listed domains,
+  validated shape, scoped token, timeouts, no pointing your server at arbitrary hosts.
+- **Guardrail to never violate:** credentials/endpoints must never enter `CallModelInput`. Auth stays
+  at provider construction; the request contract stays credential-free.
+- **Do NOT build ahead of a concrete external-bot integration** — the right shape for delegated auth
+  (BYO-account vs. metered-under-our-quota, OAuth vs. key-passthrough vs. token-minting, who bears cost
+  and trust) depends on questions the ecosystem hasn't answered yet. The v1 interface is compatible with
+  all of these, which is the point: waiting costs nothing. *Why it matters:* it's the auth foundation
+  the bot-store (`P2`) needs, and getting the "provider owns auth, input stays credential-free" boundary
+  right now (already true) keeps every future variant a clean addition.
+
 ### P3 — Clean content-ingestion boundary (forward-compat seam — do when content-management is built)
 Not a feature on its own, but a **constraint** on the content-management work (the `/manage`
 Documents/Context tab that will replace DEPLOYMENT B2's manual SQL): whatever writes to `doc_cache`

@@ -20,8 +20,10 @@ let mockUsage = {
 let mockModel = 'claude-3-5-sonnet-20241022';
 let mockRequestId = 'req-123';
 let mockStopReason = 'end_turn';
+let lastInput: any = null;
 
-setMockCallModel(async () => {
+setMockCallModel(async (input) => {
+  lastInput = input;
   return {
     text: 'This is a mock response.',
     usage: { ...mockUsage },
@@ -100,6 +102,7 @@ async function main() {
       botId: BOT_A,
     });
     assert.strictEqual(answerText, 'This is a mock response.');
+    assert.strictEqual(lastInput.cacheable, true, 'Answer path must pass cacheable: true');
 
     // Query ledger directly
     const calls1 = await sql`select * from public.model_calls where entity_id = ${E1} and bot_id = ${BOT_A}`;
@@ -111,7 +114,7 @@ async function main() {
     assert.strictEqual(calls1[0].group_id, GROUP_A);
     assert.strictEqual(calls1[0].thread_id, threadUuid);
     assert.strictEqual(calls1[0].bot_id, BOT_A);
-    assert.strictEqual(calls1[0].provider, 'anthropic');
+    assert.strictEqual(calls1[0].provider, 'anthropic', 'Provider must be resolved from provider.name');
     assert.strictEqual(calls1[0].metadata.requestId, 'req-123');
     assert.strictEqual(calls1[0].metadata.stopReason, 'end_turn');
     assert.strictEqual(calls1[0].metadata.telegramThreadId, 42);
@@ -152,6 +155,9 @@ async function main() {
     assert.strictEqual(calls2[0].input_tokens, 220);
     assert.strictEqual(calls2[0].output_tokens, 110);
     assert.strictEqual(calls2[0].bot_id, BOT_A);
+    assert.strictEqual(calls2[0].provider, 'anthropic', 'Provider must be resolved from provider.name');
+    assert.strictEqual(lastInput.cacheable, false, 'Recap path must pass cacheable: false');
+    assert.ok(lastInput.systemPrompt.includes('summarizing a team chat conversation'), 'Recap systemPrompt must remain fully intact');
     console.log('✅ Test 2 Passed.');
 
     // =========================================================================
