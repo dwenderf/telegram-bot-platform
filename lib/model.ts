@@ -1,4 +1,5 @@
 import { AnthropicProvider } from './providers/anthropic';
+import { DeepSeekProvider } from './providers/deepseek';
 
 export interface CallModelInput {
   systemPrompt: string;
@@ -39,12 +40,20 @@ export function getGlobalMock() {
 
 // Singleton instances
 let anthropicProviderInstance: AnthropicProvider | null = null;
+let deepseekProviderInstance: DeepSeekProvider | null = null;
 
 function getAnthropicProvider(): AnthropicProvider {
   if (!anthropicProviderInstance) {
     anthropicProviderInstance = new AnthropicProvider();
   }
   return anthropicProviderInstance;
+}
+
+function getDeepSeekProvider(): DeepSeekProvider {
+  if (!deepseekProviderInstance) {
+    deepseekProviderInstance = new DeepSeekProvider();
+  }
+  return deepseekProviderInstance;
 }
 
 /**
@@ -60,6 +69,9 @@ export function resolveProvider(modelName?: string | null): ModelProvider {
     };
   }
 
-  // Default to AnthropicProvider (DeepSeek routing deferred to future phase)
+  if (modelName && modelName.startsWith('deepseek')) {
+    return getDeepSeekProvider();
+  }
+
   return getAnthropicProvider();
 }

@@ -142,6 +142,27 @@ Three distinct extensibility surfaces, each with its own seam already partly in 
   dissolves the "deferred custody problem" below: if a submitter mints a scoped token against *their
   own* account rather than handing us a stored key, we stop being the custodian of their credential
   for that call. Implementation-discipline record: `BACKLOG.md` `P4`.
+- **Model *behavior* (thinking, effort, caching) is provider/model identity, not shared config (decided
+  2026-07-03).** As real providers arrive, each carries provider-specific generation behavior — e.g.
+  DeepSeek's thinking/non-thinking modes, Anthropic's effort levels, DeepSeek's automatic caching vs.
+  Anthropic's explicit markers. The principle: these live **inside the provider**, expressed through
+  **provider/model selection**, never leaked into the neutral request contract or into per-provider env
+  knobs. DeepSeek itself models this the right way — `deepseek-chat` (non-thinking) and
+  `deepseek-reasoner` (thinking) are *distinct model identifiers* of the same underlying model. So the
+  direction is: a thinking DeepSeek provider and a non-thinking one are **two providers/models the
+  resolver routes between** (like flash-vs-pro is already just a model-string swap), and eventually the
+  **caller chooses per workload** — a research capability picks the thinking variant, a quick doc-lookup
+  picks the non-thinking one. That caller-chooses-the-model future is the same bot-chooses-its-model
+  direction the `resolveProvider(modelName)` seam already anticipates; thinking-vs-not is simply one
+  axis it will route on.
+  - **Anti-pattern to avoid (the foreclosure check):** do **not** add per-provider behavior knobs to
+    env (`DEEPSEEK_THINKING`, `DEEPSEEK_EFFORT`, …). Per-provider env vars are a flat/global surface
+    for hierarchical/per-provider settings — they become an unreadable provider×setting matrix fast.
+    When a behavior variant is actually needed (e.g. thinking-on for a reasoning capability), add it as
+    a **distinct provider/model the resolver routes to**, not a config flag. Near-term this stays
+    trivial: the first DeepSeek provider hardcodes `thinking: disabled` (the workload is doc-grounded
+    Q&A + recaps, where reasoning tokens are pure output-cost overhead); the two-variant split is
+    deferred until a reasoning-heavy capability actually wants thinking-on.
 
 ### Surface 3 — The integration layer (MCP / APIs) — the keystone
 *"How do surfaces 1 and 2 become open rather than internal?"*

@@ -229,7 +229,8 @@ values (
    |---|---|---|---|
    | `DATABASE_URL` | the **transaction-mode pooler** string (see below) | **Yes** | **Must be the `bot_service` role**, not `postgres`. |
    | `ANTHROPIC_API_KEY` | your Anthropic key | **Yes** | The model provider key. |
-   | `ANTHROPIC_MODEL` | a current model id, e.g. `claude-sonnet-4-6` | No | Platform-wide default model. |
+   | `DEEPSEEK_API_KEY` | your DeepSeek key | **Yes** | **Optional** — required only when using a DeepSeek model (e.g. `deepseek-v4-flash`). |
+   | `MODEL_IDENTIFIER` | a current model id, e.g. `claude-sonnet-4-6` or `deepseek-v4-flash` | No | Platform-wide default model (the code checks `MODEL_IDENTIFIER` / `ANTHROPIC_MODEL`). |
    | `GITHUB_WEBHOOK_SECRET` | a strong shared secret | **Yes** | **Only needed if the optional GitHub sync-source is enabled** (not used in v1). Global HMAC secret; generate via password manager. |
    | `NEXT_PUBLIC_SUPABASE_URL` | your Supabase project URL | No | Public by design; required for client-side Auth & DB queries. |
    | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | your Supabase publishable key (`sb_publishable_...`) | No | Public by design (browser-exposed, RLS-enforced); required for client-side Auth & DB. |
@@ -706,3 +707,26 @@ select vault.update_secret(
 - **B5 content apostrophes break the SQL editor** — a stray apostrophe in pasted content is read as a string delimiter and breaks the statement. B5 hardened with distinctive `$KENNTNIS_DOC$` dollar-quoting + explicit paste markers.
 - **Deprecated model id** — hardcoded `claude-3-5-sonnet-20241022` returned 404 "model not found" (surfaced as the bot's "something went wrong" reply). Moved to `ANTHROPIC_MODEL` env var defaulting to `claude-sonnet-4-6` (B7 note, A7 env table).
 - **`/whoami` + command sync** — `/whoami` command added (echoes chat/thread/user ids + resolved entity/group; works in unregistered groups). `setMyCommands` now driven by `lib/commands.ts` (single source of truth) + `scripts/sync-commands.ts` (bulk-registers all bots; needs `export ADMIN_DATABASE_URL` with the **pooler** host).
+
+---
+
+## Model Provider Operations
+
+### Switching the Active Model/Provider (Configuration Action)
+Swapping the model identifier or default provider is handled entirely via environment variable changes:
+1. Update `MODEL_IDENTIFIER` (or `ANTHROPIC_MODEL`) in Vercel to the desired model ID:
+   - For Anthropic: e.g. `claude-3-5-sonnet-20241022`, `claude-3-5-haiku-20241022`.
+   - For DeepSeek: e.g. `deepseek-v4-flash`, `deepseek-v4-pro`.
+2. If swapping to a `deepseek-*` model, verify `DEEPSEEK_API_KEY` is set in Vercel.
+3. Redeploy the application. The dynamic provider resolver (`resolveProvider`) routes matching model requests based on prefix.
+
+### Adding a New Provider (Code Action)
+Adding a brand-new provider requires extending code, not just changing configuration:
+1. Create a new provider file under `lib/providers/` implementing the `ModelProvider` interface.
+2. Register the routing logic (e.g. prefix match) inside `resolveProvider` in `lib/model.ts`.
+3. Add the credential key to `.env.example`, the validator in `lib/config.ts` (if applicable), and document it in `DEPLOYMENT.md`.
+
+### Data Governance Policy
+> [!IMPORTANT]
+> Setting `MODEL_IDENTIFIER` to a `deepseek-*` model routes all conversation context (user messages, system prompt contexts, and documents) to the DeepSeek API endpoint. Operators must verify DeepSeek's current terms, privacy posture, and location compliance before deploying a DeepSeek model configuration in production.
+
