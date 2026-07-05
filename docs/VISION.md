@@ -64,6 +64,26 @@ Three distinct extensibility surfaces, each with its own seam already partly in 
   their source into the cache. We provide the plumbing + the cache; connectors are an ecosystem.
 - **Seam already planted:** the store abstraction (cache decoupled from source); the dormant GitHub
   sync code as a reference sync-source.
+- **Sync is one-way; the source owns synced docs (decided 2026-07-03 — direction, and the seam already
+  exists in schema).** When a sync source is enabled, it is **one-directional**: the external source is
+  authoritative, and a synced doc is **read-only from the platform side**. To change a synced doc you
+  edit it *at the source* and let sync propagate — the platform never writes back, and there is no
+  bidirectional merge/conflict logic to build (that whole category is foreclosed by principle). A
+  non-synced doc is directly writable because no source contests it. So the rule is per-doc: *if it has
+  an authoritative source, the source owns it; if not, direct editing owns it.*
+  - **Enforcement seam is already in the schema** (`20260701000000_manifest_normalization_additive.sql`):
+    `doc_cache.source_type text not null default 'manual'` with a **CHECK constraint that currently
+    admits only `'manual'`**, plus a `source jsonb` locator (already carrying `git_sha`). Today the
+    CHECK makes "every doc is manual, hence directly writable" a **database-enforced invariant**, not
+    an assumption — nothing can even insert a non-manual doc yet. When sync is built, three things move
+    together in one migration/phase: the CHECK **widens** to admit the new source type (e.g.
+    `'github'`), the sync writer **stamps** `source_type` + populates `source`, and the write path gates
+    direct edits on `source_type = 'manual'`. The widening of that CHECK is the explicit, reviewable
+    moment non-manual docs become possible.
+  - *Why this matters as a foreclosure check:* any near-term doc-editing tooling (operator scripts, or
+    later the entity-admin UI) should gate writes on `source_type = 'manual'` from the start — cheap
+    now (it's always true today), and it means the read-only-synced-doc rule is honored the day sync
+    lands without retrofitting the write path.
 - **User signal:** a prospective user (2026-06-29) keeps his content in **Notion** and has struggled
   to get comparable tools working because of it — validating both the abstraction and the specific
   near-term value of a Notion sync-source.
