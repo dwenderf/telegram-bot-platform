@@ -4,6 +4,7 @@ import { getModelMaxOutputTokens } from '../config';
 
 export class DeepSeekProvider implements ModelProvider {
   readonly name = 'deepseek';
+  readonly outputFormat = 'markdown';
   private anthropic: Anthropic;
 
   constructor() {

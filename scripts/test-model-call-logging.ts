@@ -94,14 +94,14 @@ async function main() {
     mockUsage = { input_tokens: 150, output_tokens: 75, cache_read_tokens: 0, cache_creation_tokens: 0 };
     mockModel = 'claude-3-5-sonnet-20241022';
 
-    const { answerText } = await answerQuestion({
+    const { text } = await answerQuestion({
       entityId: E1,
       groupId: GROUP_A,
       threadId: 42,
       question: 'Testing model usage logging',
       botId: BOT_A,
     });
-    assert.strictEqual(answerText, 'This is a mock response.');
+    assert.strictEqual(text, 'This is a mock response.');
     assert.strictEqual(lastInput.cacheable, true, 'Answer path must pass cacheable: true');
 
     // Query ledger directly
@@ -290,7 +290,7 @@ async function main() {
       threadId: 42,
       question: 'Constraint failure check',
     });
-    assert.strictEqual(res7.answerText, 'This is a mock response.', 'Answer should be successfully returned despite logging error');
+    assert.strictEqual(res7.text, 'This is a mock response.', 'Answer should be successfully returned despite logging error');
 
     // Clean up constraint in test body (also handled in finally)
     await sql`alter table public.model_calls drop constraint if exists test_fail`;

@@ -150,7 +150,7 @@ async function main() {
       threadId: 42,
       limit: 5,
     });
-    assert.strictEqual(recap.recapText, 'This is a mock response.', 'recapConversation must execute successfully and return the mocked response');
+    assert.strictEqual(recap.text, 'This is a mock response.', 'recapConversation must execute successfully and return the mocked response');
     assert.ok(lastUserMessage.includes('tester: edited message content'), 'recapConversation transcript input must reflect the edited text');
     assert.ok(!lastUserMessage.includes('original message content'), 'recapConversation transcript input must NOT show the original text');
     console.log('✅ Test 3 Passed.');

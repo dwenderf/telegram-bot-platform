@@ -24,6 +24,7 @@ export interface CallModelResult {
 
 export interface ModelProvider {
   readonly name: string;
+  readonly outputFormat: 'markdown' | 'html';
   callModel(input: CallModelInput): Promise<CallModelResult>;
 }
 
@@ -65,6 +66,7 @@ export function resolveProvider(modelName?: string | null): ModelProvider {
   if (mock) {
     return {
       name: 'anthropic',
+      outputFormat: 'markdown',
       callModel: mock,
     };
   }

@@ -10,9 +10,12 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.2",
+    "@gramio/format": "^0.9.0",
     "@supabase/supabase-js": "^2.108.2",
     "@vercel/functions": "^3.7.1",
+    "marked": "^15.0.12",
     "next": "16.2.9",
+    "node-html-parser": "^9.0.0",
     "postgres": "^3.4.9"
   },
   "devDependencies": {

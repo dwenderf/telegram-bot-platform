@@ -571,22 +571,20 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       waitUntil(
         (async () => {
           try {
-            const { recapText } = await recapConversation({
+            const { text, entities } = await recapConversation({
               entityId: entity.id,
               groupId: group.id,
               threadId,
               limit: requested,
               botId,
+              note: note || null,
             });
-
-            const prefix = note ? `<i>${escapeHtml(note)}</i>\n\n` : '';
-            const sanitized = sanitizeForTelegramHtml(recapText);
 
             await sendMessage(
               bot.telegram_bot_token,
               message.chat.id,
-              prefix + sanitized,
-              { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
+              text,
+              { threadId, replyToMessageId: message.message_id, entities }
             );
 
             try {
@@ -596,7 +594,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                 telegramChatId: message.chat.id,
                 telegramThreadId: threadId,
                 botUsername: bot.telegram_username,
-                messageText: recapText,
+                messageText: text,
                 summary: null,
                 generationMetadata: {
                   model: bot.model || getModelIdentifier(),
@@ -642,7 +640,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               await resolveUser(entity.id, group.id, message.from);
             }
 
-            const { answerText } = await answerQuestion({
+            const { text, entities } = await answerQuestion({
               entityId: entity.id,
               groupId: group.id,
               threadId: threadId,
@@ -652,12 +650,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               botId,
             });
 
-            const sanitizedAnswer = sanitizeForTelegramHtml(answerText);
-
-            await sendMessage(bot.telegram_bot_token, message.chat.id, sanitizedAnswer, {
+            await sendMessage(bot.telegram_bot_token, message.chat.id, text, {
               threadId: threadId,
               replyToMessageId: message.message_id,
-              parseMode: 'HTML',
+              entities,
             });
 
             try {
@@ -667,7 +663,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                 telegramChatId: message.chat.id,
                 telegramThreadId: threadId,
                 botUsername: bot.telegram_username,
-                messageText: answerText,
+                messageText: text,
                 summary: null,
                 generationMetadata: {
                   model: bot.model || getModelIdentifier(),

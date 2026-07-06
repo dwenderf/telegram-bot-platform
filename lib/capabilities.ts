@@ -1,6 +1,10 @@
 import { sql, withTenantContext } from './supabase';
 import { resolveProvider, CallModelResult } from './model';
 import { getModelIdentifier, getContextMessageHistoryLimit } from './config';
+import { htmlToFormattable } from '@gramio/format/html';
+import { markdownToFormattable } from '@gramio/format/markdown';
+
+export type TelegramMessageEntity = ReturnType<typeof htmlToFormattable>['entities'][number];
 
 export interface Entity {
   id: string;
@@ -255,6 +259,28 @@ async function logModelCall(input: {
 }
 
 /**
+ * Helper to wrap raw note in italic style based on target format.
+ * Escape warning: if the note ever contains Markdown special characters (*, _, [, etc.),
+ * it must be escaped before prepending to prevent it from being parsed as formatting.
+ */
+function formatItalicNote(note: string, format: 'markdown' | 'html'): string {
+  return format === 'html' ? `<i>${note}</i>\n\n` : `_${note}_\n\n`;
+}
+
+/**
+ * Helper to translate raw model output text into plain text + Telegram MessageEntities.
+ */
+export function renderModelOutput(text: string, outputFormat: 'markdown' | 'html'): { text: string; entities: TelegramMessageEntity[] } {
+  const result = outputFormat === 'html'
+    ? htmlToFormattable(text)
+    : markdownToFormattable(text);
+  return {
+    text: result.text,
+    entities: result.entities,
+  };
+}
+
+/**
  * Generate an answer. Internally builds the system prompt, calls the model provider, and returns answer.
  */
 export async function answerQuestion(input: {
@@ -265,7 +291,7 @@ export async function answerQuestion(input: {
   model?: string | null;
   persona?: string | null;
   botId?: string | null;
-}): Promise<{ answerText: string }> {
+}): Promise<{ text: string; entities: TelegramMessageEntity[] }> {
   // Load the project documentation and recent transcript context
   const { contextDocs, recentConversation } = await buildContext(
     input.entityId,
@@ -315,8 +341,10 @@ ${input.question}`;
     providerName: provider.name,
   });
 
+  const rendered = renderModelOutput(result.text, provider.outputFormat);
   return {
-    answerText: result.text,
+    text: rendered.text,
+    entities: rendered.entities,
   };
 }
 
@@ -447,7 +475,8 @@ export async function recapConversation(input: {
   threadId: bigint | number | string | null;
   limit: number;
   botId?: string | null;
-}): Promise<{ recapText: string }> {
+  note?: string | null;
+}): Promise<{ text: string; entities: TelegramMessageEntity[] }> {
   const threadIdStr =
     input.threadId !== null && input.threadId !== undefined ? input.threadId.toString() : null;
 
@@ -470,7 +499,10 @@ export async function recapConversation(input: {
   });
 
   if (!transcript.trim()) {
-    return { recapText: 'There are no recent messages in this topic to recap yet.' };
+    return {
+      text: 'There are no recent messages in this topic to recap yet.',
+      entities: [],
+    };
   }
 
   const model = getModelIdentifier();
@@ -506,7 +538,16 @@ Guidelines:
     providerName: provider.name,
   });
 
-  return { recapText: result.text };
+  let combinedText = result.text;
+  if (input.note) {
+    combinedText = formatItalicNote(input.note, provider.outputFormat) + combinedText;
+  }
+
+  const rendered = renderModelOutput(combinedText, provider.outputFormat);
+  return {
+    text: rendered.text,
+    entities: rendered.entities,
+  };
 }
 
 /**

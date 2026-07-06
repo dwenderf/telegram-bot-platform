@@ -1,9 +1,13 @@
 import { BOT_COMMANDS, type BotCommand } from './commands';
+import { htmlToFormattable } from '@gramio/format/html';
+
+export type TelegramMessageEntity = ReturnType<typeof htmlToFormattable>['entities'][number];
 
 interface SendMessageOptions {
   replyToMessageId?: number;
   threadId?: bigint | number;
   parseMode?: 'HTML' | 'MarkdownV2' | string;
+  entities?: TelegramMessageEntity[];
 }
 
 /**
@@ -97,7 +101,10 @@ export async function sendMessage(
     body.reply_to_message_id = options.replyToMessageId;
   }
 
-  if (options.parseMode) {
+  // providing entities always means parse_mode is omitted — the two are mutually exclusive (Telegram breaks the message if both are set).
+  if (options.entities) {
+    body.entities = options.entities;
+  } else if (options.parseMode) {
     body.parse_mode = options.parseMode;
   }
 
