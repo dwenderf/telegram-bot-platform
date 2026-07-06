@@ -481,10 +481,10 @@ in the SQL editor as `postgres`.
 --    alter the two $KENNTNIS_DOC$ markers themselves. (The distinctive tag is
 --    chosen so your real content can't accidentally contain it.)
 --    on conflict makes the statement re-runnable (updates existing content).
-insert into doc_cache (entity_id, doc_path, content, git_sha)
+insert into doc_cache (entity_id, display_name, content)
 values (
-  'THE_ENTITY_ID',
-  'entity-context-overview',
+  '<entity-id>',
+  '<document-display-name>',
   $KENNTNIS_DOC$
 <<< PASTE CONTENT BELOW THIS LINE — do not touch the $KENNTNIS_DOC$ markers >>>
 
@@ -495,17 +495,14 @@ should be able to answer from. Apostrophes are fine here — e.g. "we're a media
 company", "the studio's mission" — no escaping needed.
 
 <<< PASTE CONTENT ABOVE THIS LINE >>>
-  $KENNTNIS_DOC$,
-  null    -- git_sha nullable; null for directly-pushed (non-Git) content
-)
-on conflict (entity_id, doc_path)
-do update set content = excluded.content, synced_at = now();
+  $KENNTNIS_DOC$
+);
 
 -- 2. Map it as an ENTITY-GENERAL doc (loads for every topic): telegram_thread_id = null.
 --    (Run once — manifest_entries has no unique constraint on these columns, so
 --    re-running would create duplicates.)
-insert into manifest_entries (entity_id, group_id, telegram_thread_id, doc_path)
-values ('THE_ENTITY_ID', null, null, 'entity-context-overview');
+insert into manifest_entries (entity_id, group_id, doc_id)
+values ('<entity-id>', null, '<doc-id-from-B2.1>');
 ```
 > **Why the `$KENNTNIS_DOC$` wrapper (and the #1 SQL-editor footgun):** in the Supabase SQL editor, an **apostrophe in your content** (we're, company's, etc.) will **break the statement** *unless* the content is dollar-quoted — a stray `'` is otherwise read as the *start* of a SQL string, and everything after it misparses (the editor often greys it out as if commented). Dollar-quoting (`$KENNTNIS_DOC$...$KENNTNIS_DOC$`) makes everything between the markers a literal, so apostrophes/quotes need **no** escaping. **Two rules:** (1) paste your content **only between** the markers, and (2) **don't disturb the `$KENNTNIS_DOC$` markers themselves** — if one gets altered or deleted, dollar-quoting collapses and apostrophes break again. The distinctive tag (`$KENNTNIS_DOC$` vs a bare `$$`) is chosen so real content can't accidentally contain it.
 
