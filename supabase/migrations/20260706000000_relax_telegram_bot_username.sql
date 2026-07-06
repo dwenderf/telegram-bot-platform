@@ -1,0 +1,28 @@
+-- Relax the telegram_bot_username column on `entities` to nullable.
+--
+-- Context: the platform-bot cutover (20260629_bot_cutover_additive) moved bot
+-- identity off the entity and onto the `bots` table — an entity no longer owns a
+-- Telegram bot, and bot identity is read via get_bot_config (bots.telegram_username),
+-- not entities.telegram_bot_username. This column was defined NOT NULL back when each
+-- entity had its own bot, so it became vestigial at the cutover but was never relaxed.
+--
+-- Symptom: the management dashboard's Create Entity flow inserts only
+-- { display_name, slug } (owner_profile_id is set by the set_entity_owner_on_insert
+-- trigger; everything else is nullable or defaulted). The lingering NOT NULL on
+-- telegram_bot_username was the sole remaining blocker, raising
+-- "null value in column \"telegram_bot_username\" ... violates not-null constraint".
+--
+-- This mirrors 20260624_relax_github_columns exactly — same class of fix (a per-entity
+-- column that stopped being meaningful after an architecture change). The column is
+-- RETAINED, not dropped: resolveTenant() in lib/capabilities.ts still SELECTs it and the
+-- Entity interface still declares it. Dropping it (together with the other vestigial
+-- per-entity-bot columns telegram_bot_token_id / telegram_webhook_secret_id) belongs to
+-- the Phase 3.1 deferred-column cleanup, behind a reader-audit + verify-then-drop gate —
+-- not an urgent, irreversible drop bundled into this unblock.
+--
+-- Idempotent: ALTER COLUMN ... DROP NOT NULL is a no-op (no error) if the column is
+-- already nullable, so a re-run / re-push is safe.
+--
+-- Created At: 2026-07-06
+
+alter table public.entities alter column telegram_bot_username drop not null;
