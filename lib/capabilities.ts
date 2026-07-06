@@ -259,6 +259,44 @@ async function logModelCall(input: {
 }
 
 /**
+ * Rationale Comment:
+ * outputFormat drives BOTH the prompt's format instruction AND the converter, and the
+ * two MUST stay in lockstep. The original bug was a format mismatch (prompt asked for HTML
+ * while outputFormat was markdown -> HTML fed to markdown converter -> literal tags).
+ * Both providers currently run 'markdown' in production because it is a simpler, more robust
+ * converter with more reliable model compliance. The 'html' path and rules block are retained
+ * as a flexibility seam but are unit-tested only, not production-exercised.
+ * Live-verify the html path if a provider is ever set back to 'html'.
+ */
+export function formatRulesFor(outputFormat: 'markdown' | 'html'): string {
+  if (outputFormat === 'html') {
+    return `OUTPUT FORMAT RULES (CRITICAL):
+- Use Telegram-HTML format.
+- ONLY use the following whitelisted HTML tags: <b>, <i>, <u>, <s>, <code>, <pre>, <a href="...">.
+- Use bullet points like "• " for lists.
+- Avoid unsupported tags like <p>, <ul>, <li>, <h1>, <div>, etc.
+- Escape literal <, >, and & (e.g. use &amp; for ampersands, &lt; for less-than, &gt; for greater-than).`;
+  }
+
+  // Markdown format rules. Genuinely contains NO escaping instructions.
+  return `OUTPUT FORMAT RULES (CRITICAL):
+- Use standard Markdown for formatting.
+- Do NOT use HTML tags.
+- Use bullet points like "• " (or "-") for lists.`;
+}
+
+/**
+ * Returns the format-aware guidelines for recap conversation summarizing.
+ */
+export function recapGuidelinesFor(outputFormat: 'markdown' | 'html'): string {
+  const boldSummary = outputFormat === 'html' ? '<b>summary</b>' : '**summary**';
+  return `Guidelines:
+- Lead with a one-line ${boldSummary}, then key points / decisions / open questions as bullets.
+- Attribute notable points to who said them when useful.
+- Be faithful to the transcript; do not invent. If it's short, keep the recap short.`;
+}
+
+/**
  * Helper to wrap raw note in italic style based on target format.
  * Escape warning: if the note ever contains Markdown special characters (*, _, [, etc.),
  * it must be escaped before prepending to prevent it from being parsed as formatting.
@@ -300,19 +338,15 @@ export async function answerQuestion(input: {
   );
 
   const model = input.model || getModelIdentifier();
+  const provider = resolveProvider(model);
 
-  const defaultPersona = `You are a helpful AI assistant for the team. Answer the user's question accurately based on the provided context documents and the recent conversation history. If the answer cannot be determined from these, politely state that you do not know.
-
-OUTPUT FORMAT RULES (CRITICAL):
-- Use Telegram-HTML format.
-- ONLY use the following whitelisted HTML tags: <b>, <i>, <u>, <s>, <code>, <pre>, <a href="...">.
-- Use bullet points like "• " for lists.
-- Avoid unsupported tags like <p>, <ul>, <li>, <h1>, <div>, etc.
-- Escape literal <, >, and & (e.g. use &amp; for ampersands, &lt; for less-than, &gt; for greater-than).`;
+  const defaultPersona = `You are a helpful AI assistant for the team. Answer the user's question accurately based on the provided context documents and the recent conversation history. If the answer cannot be determined from these, politely state that you do not know.`;
 
   const basePersona = input.persona || defaultPersona;
 
   const systemPrompt = `${basePersona}
+
+${formatRulesFor(provider.outputFormat)}
 
 PROJECT CONTEXT:
 ${contextDocs}`;
@@ -323,7 +357,6 @@ ${recentConversation}
 QUESTION:
 ${input.question}`;
 
-  const provider = resolveProvider(model);
   const result = await provider.callModel({
     systemPrompt,
     userMessage,
@@ -506,21 +539,15 @@ export async function recapConversation(input: {
   }
 
   const model = getModelIdentifier();
-  const systemPrompt = `You are summarizing a team chat conversation. Produce a concise, well-organized recap of the discussion below.
-
-OUTPUT FORMAT RULES (CRITICAL):
-- Use Telegram-HTML format.
-- ONLY these tags: <b>, <i>, <u>, <s>, <code>, <pre>, <a href="...">.
-- Use "• " for bullet points.
-- No <p>, <ul>, <li>, <h1>, <div>, etc.
-- Escape literal <, >, & as &lt; &gt; &amp;.
-
-Guidelines:
-- Lead with a one-line <b>summary</b>, then key points / decisions / open questions as bullets.
-- Attribute notable points to who said them when useful.
-- Be faithful to the transcript; do not invent. If it's short, keep the recap short.`;
-
   const provider = resolveProvider(model);
+
+  const baseRecapPrompt = `You are summarizing a team chat conversation. Produce a concise, well-organized recap of the discussion below.`;
+  const systemPrompt = `${baseRecapPrompt}
+
+${formatRulesFor(provider.outputFormat)}
+
+${recapGuidelinesFor(provider.outputFormat)}`;
+
   const result = await provider.callModel({
     systemPrompt,
     userMessage: `Recap the last ${input.limit} messages of this conversation:\n\n${transcript}`,

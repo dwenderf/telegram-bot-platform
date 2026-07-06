@@ -24,6 +24,12 @@ export interface CallModelResult {
 
 export interface ModelProvider {
   readonly name: string;
+  /**
+   * The output format that the provider is expected to emit (and that the capabilities
+   * layer will convert to Telegram MessageEntities). This field governs BOTH the format
+   * instruction injected into the system prompt AND the converter selection — they must
+   * stay in lockstep.
+   */
   readonly outputFormat: 'markdown' | 'html';
   callModel(input: CallModelInput): Promise<CallModelResult>;
 }

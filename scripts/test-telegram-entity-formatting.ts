@@ -6,7 +6,7 @@ import { resolveProvider } from '../lib/model';
 import { DeepSeekProvider } from '../lib/providers/deepseek';
 import { AnthropicProvider } from '../lib/providers/anthropic';
 import { sendMessage } from '../lib/telegram';
-import { answerQuestion, recapConversation, renderModelOutput } from '../lib/capabilities';
+import { answerQuestion, recapConversation, renderModelOutput, formatRulesFor, recapGuidelinesFor } from '../lib/capabilities';
 import { setMockCallModel } from '../lib/anthropic';
 import { markdownToFormattable } from '@gramio/format/markdown';
 import { htmlToFormattable } from '@gramio/format/html';
@@ -179,7 +179,7 @@ async function main() {
     assert.strictEqual(dsProvider.outputFormat, 'markdown');
 
     const antProvider = resolveProvider('claude-3-5-sonnet-20241022');
-    assert.strictEqual(antProvider.outputFormat, 'html');
+    assert.strictEqual(antProvider.outputFormat, 'markdown');
 
     // Assert divergent formatting behavior inside capabilities layer helpers
     // Under markdown, "**world**" is parsed and formatted
@@ -218,6 +218,109 @@ async function main() {
     assert.strictEqual(lastRequestBody.entities, undefined);
 
     console.log('✅ Test 8 Passed.');
+
+    // =========================================================================
+    // Test 9: Prompt reflects outputFormat (presence of correct, absence of wrong)
+    // =========================================================================
+    console.log('Test 9: Verifying prompt reflects outputFormat (presence and absence)...');
+    
+    // Markdown format rules check
+    const mdRules = formatRulesFor('markdown');
+    assert.ok(mdRules.includes('Use standard Markdown'), 'Markdown rules must contain markdown rules');
+    assert.ok(mdRules.includes('Do NOT use HTML tags'), 'Markdown rules must forbid HTML');
+    assert.ok(!mdRules.includes('Use Telegram-HTML format'), 'Markdown rules must NOT contain HTML rules');
+    assert.ok(!mdRules.includes('&amp;'), 'Markdown rules must NOT contain escaping rules');
+
+    // HTML format rules check
+    const htmlRules = formatRulesFor('html');
+    assert.ok(htmlRules.includes('Use Telegram-HTML format'), 'HTML rules must contain HTML rules');
+    assert.ok(htmlRules.includes('&amp;'), 'HTML rules must contain escaping rules');
+    assert.ok(!htmlRules.includes('Use standard Markdown'), 'HTML rules must NOT contain markdown rules');
+    
+    console.log('✅ Test 9 Passed.');
+
+    // =========================================================================
+    // Test 10: Recap guidelines are format-aware
+    // =========================================================================
+    console.log('Test 10: Verifying recap guidelines format-awareness...');
+    
+    const mdRecap = recapGuidelinesFor('markdown');
+    assert.ok(mdRecap.includes('**summary**'), 'Markdown recap guidelines must use markdown bold');
+    assert.ok(!mdRecap.includes('<b>summary</b>'), 'Markdown recap guidelines must NOT use HTML bold');
+
+    const htmlRecap = recapGuidelinesFor('html');
+    assert.ok(htmlRecap.includes('<b>summary</b>'), 'HTML recap guidelines must use HTML bold');
+    assert.ok(!htmlRecap.includes('**summary**'), 'HTML recap guidelines must NOT use markdown bold');
+
+    console.log('✅ Test 10 Passed.');
+
+    // =========================================================================
+    // Test 11: Format rules in systemPrompt, not userMessage (cache stability)
+    // =========================================================================
+    console.log('Test 11: Verifying rules are in systemPrompt and not userMessage...');
+    
+    let capturedSystemPrompt = '';
+    let capturedUserMessage = '';
+
+    setMockCallModel(async (input) => {
+      capturedSystemPrompt = input.systemPrompt;
+      capturedUserMessage = input.userMessage;
+      return {
+        text: 'Mock response',
+        usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'deepseek-v4-flash',
+        requestId: 'req-cache',
+        stopReason: 'end_turn',
+      };
+    });
+
+    await answerQuestion({
+      entityId: E1,
+      groupId: GROUP_A,
+      threadId: null,
+      question: 'Cache check',
+      model: 'deepseek-v4-flash',
+    });
+
+    assert.ok(capturedSystemPrompt, 'System prompt must be captured');
+    assert.ok(capturedSystemPrompt.includes('OUTPUT FORMAT RULES'), 'System prompt must contain rules');
+    assert.ok(!capturedUserMessage?.includes('OUTPUT FORMAT RULES'), 'User message must NOT contain rules');
+
+    setMockCallModel(null);
+    console.log('✅ Test 11 Passed.');
+
+    // =========================================================================
+    // Test 12: Custom persona still gets format rules appended
+    // =========================================================================
+    console.log('Test 12: Verifying custom persona gets format rules appended...');
+
+    capturedSystemPrompt = '';
+    setMockCallModel(async (input) => {
+      capturedSystemPrompt = input.systemPrompt;
+      return {
+        text: 'Mock response',
+        usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'deepseek-v4-flash',
+        requestId: 'req-persona',
+        stopReason: 'end_turn',
+      };
+    });
+
+    await answerQuestion({
+      entityId: E1,
+      groupId: GROUP_A,
+      threadId: null,
+      question: 'Persona check',
+      model: 'deepseek-v4-flash',
+      persona: 'Custom role description.',
+    });
+
+    assert.ok(capturedSystemPrompt);
+    assert.ok(capturedSystemPrompt.startsWith('Custom role description.'), 'System prompt must start with custom persona');
+    assert.ok(capturedSystemPrompt.includes('OUTPUT FORMAT RULES'), 'System prompt must still append format rules');
+
+    setMockCallModel(null);
+    console.log('✅ Test 12 Passed.');
 
     console.log('🎉 ALL TELEGRAM ENTITY FORMATTING TESTS PASSED SUCCESSFULLY! 🎉');
   } finally {

@@ -14,7 +14,7 @@ const anthropic = new Anthropic({
 
 export class AnthropicProvider implements ModelProvider {
   readonly name = 'anthropic';
-  readonly outputFormat = 'html';
+  readonly outputFormat = 'markdown';
 
   async callModel(input: CallModelInput): Promise<CallModelResult> {
     try {
