@@ -6,6 +6,7 @@ export interface CallModelInput {
   userMessage: string;
   model: string;
   cacheable: boolean;
+  isolationScopeId: string; // required; produced only by resolveIsolationScopeId()
 }
 
 export interface CallModelResult {

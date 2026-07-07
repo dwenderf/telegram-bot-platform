@@ -1,6 +1,7 @@
 import { sql, withTenantContext } from './supabase';
 import { resolveProvider, CallModelResult } from './model';
 import { getModelIdentifier, getContextMessageHistoryLimit } from './config';
+import { resolveIsolationScopeId, ISOLATION_SCOPE_TYPE } from './isolation';
 import { htmlToFormattable } from '@gramio/format/html';
 import { markdownToFormattable } from '@gramio/format/markdown';
 
@@ -203,7 +204,7 @@ export async function buildContext(
  * Safely log a model call to the model_calls ledger.
  * Wrapped in try-catch so failures never block the user-facing answers.
  */
-async function logModelCall(input: {
+export async function logModelCall(input: {
   entityId: string;
   groupId: string | null;
   threadId: bigint | number | string | null;
@@ -211,6 +212,7 @@ async function logModelCall(input: {
   callType: 'answer' | 'recap';
   result: CallModelResult;
   providerName: string;
+  isolationScopeId: string;
 }): Promise<void> {
   try {
     const threadIdStr = input.threadId !== null && input.threadId !== undefined ? input.threadId.toString() : null;
@@ -245,10 +247,12 @@ async function logModelCall(input: {
           ${input.result.usage.cache_read_tokens ?? 0},
           ${input.result.usage.cache_creation_tokens ?? 0},
           ${tx.json({
+            ...input.result.raw,
+            isolationScopeId: input.isolationScopeId,
+            isolationScopeType: ISOLATION_SCOPE_TYPE,
             requestId: input.result.requestId,
             stopReason: input.result.stopReason,
             telegramThreadId: threadIdStr ? parseInt(threadIdStr, 10) : null,
-            ...input.result.raw
           })}
         )
       `;
@@ -330,6 +334,8 @@ export async function answerQuestion(input: {
   persona?: string | null;
   botId?: string | null;
 }): Promise<{ text: string; entities: TelegramMessageEntity[] }> {
+  const isolationScopeId = resolveIsolationScopeId(input.groupId);
+
   // Load the project documentation and recent transcript context
   const { contextDocs, recentConversation } = await buildContext(
     input.entityId,
@@ -362,6 +368,7 @@ ${input.question}`;
     userMessage,
     model,
     cacheable: true,
+    isolationScopeId,
   });
 
   await logModelCall({
@@ -372,6 +379,7 @@ ${input.question}`;
     callType: 'answer',
     result,
     providerName: provider.name,
+    isolationScopeId,
   });
 
   const rendered = renderModelOutput(result.text, provider.outputFormat);
@@ -510,6 +518,8 @@ export async function recapConversation(input: {
   botId?: string | null;
   note?: string | null;
 }): Promise<{ text: string; entities: TelegramMessageEntity[] }> {
+  const isolationScopeId = resolveIsolationScopeId(input.groupId);
+
   const threadIdStr =
     input.threadId !== null && input.threadId !== undefined ? input.threadId.toString() : null;
 
@@ -553,6 +563,7 @@ ${recapGuidelinesFor(provider.outputFormat)}`;
     userMessage: `Recap the last ${input.limit} messages of this conversation:\n\n${transcript}`,
     model,
     cacheable: false,
+    isolationScopeId,
   });
 
   await logModelCall({
@@ -563,6 +574,7 @@ ${recapGuidelinesFor(provider.outputFormat)}`;
     callType: 'recap',
     result,
     providerName: provider.name,
+    isolationScopeId,
   });
 
   let combinedText = result.text;

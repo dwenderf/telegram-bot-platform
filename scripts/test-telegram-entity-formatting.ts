@@ -6,7 +6,8 @@ import { resolveProvider } from '../lib/model';
 import { DeepSeekProvider } from '../lib/providers/deepseek';
 import { AnthropicProvider } from '../lib/providers/anthropic';
 import { sendMessage } from '../lib/telegram';
-import { answerQuestion, recapConversation, renderModelOutput, formatRulesFor, recapGuidelinesFor } from '../lib/capabilities';
+import { answerQuestion, recapConversation, renderModelOutput, formatRulesFor, recapGuidelinesFor, logModelCall } from '../lib/capabilities';
+import { resolveIsolationScopeId } from '../lib/isolation';
 import { setMockCallModel } from '../lib/anthropic';
 import { markdownToFormattable } from '@gramio/format/markdown';
 import { htmlToFormattable } from '@gramio/format/html';
@@ -16,16 +17,44 @@ export type TelegramMessageEntity = ReturnType<typeof htmlToFormattable>['entiti
 // Setup environment variables for testing
 process.env.DEEPSEEK_API_KEY = 'dummy-deepseek-key';
 process.env.ANTHROPIC_API_KEY = 'dummy-anthropic-key';
+process.env.APP_HMAC_PEPPER = 'dummy-test-pepper-high-entropy-random-string';
 
-let lastRequestUrl: string | null = null;
+let lastRequestUrl = '';
 let lastRequestBody: any = null;
+let lastProviderUrl = '';
+let lastProviderBody: any = null;
 
 // Backup original fetch to restore it later
 const originalFetch = global.fetch;
 
-// Mock global fetch to capture sendMessage payload
+// Mock global fetch to capture sendMessage payload and provider calls
 global.fetch = async (url: any, options: any) => {
-  lastRequestUrl = url.toString();
+  const urlStr = url.toString();
+  if (urlStr.includes('api.anthropic.com') || urlStr.includes('api.deepseek.com')) {
+    lastProviderUrl = urlStr;
+    lastProviderBody = JSON.parse(options.body);
+    const messagesBody = {
+      id: 'msg-mocked',
+      type: 'message',
+      role: 'assistant',
+      model: lastProviderBody.model || 'dummy-model',
+      content: [{ type: 'text', text: 'Mocked reply' }],
+      stop_reason: 'end_turn',
+      usage: {
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+    };
+    return new Response(JSON.stringify(messagesBody), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }) as any;
+  }
+
+  // Telegram Mock
+  lastRequestUrl = urlStr;
   lastRequestBody = JSON.parse(options.body);
   return {
     ok: true,
@@ -321,6 +350,183 @@ async function main() {
 
     setMockCallModel(null);
     console.log('✅ Test 12 Passed.');
+
+    // =========================================================================
+    // Test 13: Provider request body carries metadata.user_id (both providers)
+    // =========================================================================
+    console.log('Test 13: Verifying provider request body carries metadata.user_id...');
+
+    // Clear any active mock so the real provider runs and hits fetch
+    setMockCallModel(null);
+    lastProviderUrl = '';
+    lastProviderBody = null;
+
+    const expectedScopeId = resolveIsolationScopeId(GROUP_A);
+
+    await answerQuestion({
+      entityId: E1,
+      groupId: GROUP_A,
+      threadId: null,
+      question: 'Test isolation wire',
+      model: 'deepseek-v4-flash',
+    });
+
+    assert.ok(lastProviderUrl, 'Fetch must have been intercepted');
+    assert.ok(lastProviderUrl.includes('api.deepseek.com'), 'Must hit DeepSeek endpoint');
+    assert.ok(lastProviderBody, 'Request body must be captured');
+    assert.ok(lastProviderBody.metadata, 'metadata must be present');
+    assert.strictEqual(lastProviderBody.metadata.user_id, expectedScopeId, 'metadata.user_id must match');
+
+    // Repeat for Anthropic path
+    lastProviderUrl = '';
+    lastProviderBody = null;
+
+    await answerQuestion({
+      entityId: E1,
+      groupId: GROUP_A,
+      threadId: null,
+      question: 'Test isolation wire anthropic',
+      model: 'claude-3-5-sonnet-20241022',
+    });
+
+    assert.ok(lastProviderUrl);
+    assert.ok(lastProviderUrl.includes('api.anthropic.com'));
+    assert.ok(lastProviderBody);
+    assert.ok(lastProviderBody.metadata);
+    assert.strictEqual(lastProviderBody.metadata.user_id, expectedScopeId);
+
+    console.log('✅ Test 13 Passed.');
+
+    // =========================================================================
+    // Test 14: Cache prefix integrity (metadata is sibling only)
+    // =========================================================================
+    console.log('Test 14: Verifying cache prefix integrity (metadata placement)...');
+
+    // Assert metadata is not inside system or messages
+    assert.ok(lastProviderBody.metadata, 'metadata is present at top-level');
+    assert.ok(!JSON.stringify(lastProviderBody.system).includes('metadata'), 'system prompt must not contain metadata content');
+    assert.ok(!JSON.stringify(lastProviderBody.messages).includes('metadata'), 'messages must not contain metadata content');
+
+    console.log('✅ Test 14 Passed.');
+
+    // =========================================================================
+    // Test 15: Resolver determinism & separation
+    // =========================================================================
+    console.log('Test 15: Verifying resolver determinism and domain separation...');
+
+    const hash1 = resolveIsolationScopeId(GROUP_A);
+    const hash2 = resolveIsolationScopeId(GROUP_A);
+    assert.strictEqual(hash1, hash2, 'Resolver must be deterministic');
+
+    // Golden vector: pins the exact hashed input (tag 'isolation-scope' + ':' separator)
+    // against a value computed independently of the resolver — the only assertion that
+    // catches a silent tag/separator change. Determinism/format checks and Test 13 all run
+    // the resolver on both sides and stay green if it drifts.
+    assert.strictEqual(
+      resolveIsolationScopeId(GROUP_A),
+      'd56fc49115a4369feb96a034772d3ed2a13f4bcfb435663ce7f6865af8c7391e',
+      'Golden vector: isolation-scope tag/separator must not drift'
+    );
+
+    const hash3 = resolveIsolationScopeId('f4400000-0000-0000-0000-000000000000');
+    assert.notStrictEqual(hash1, hash3, 'Different groups must produce different hashes');
+
+    assert.match(hash1, /^[a-f0-9]{64}$/, 'Hash must be a 64-character lowercase hex string');
+
+    console.log('✅ Test 15 Passed.');
+
+    // =========================================================================
+    // Test 16: Resolver guards
+    // =========================================================================
+    console.log('Test 16: Verifying resolver guards throw on empty input...');
+
+    assert.throws(() => {
+      resolveIsolationScopeId('');
+    }, /groupId is required/, 'Should throw if groupId is empty');
+
+    // Direct test for missing pepper on the resolver
+    const savedPepper16 = process.env.APP_HMAC_PEPPER;
+    delete process.env.APP_HMAC_PEPPER;
+    try {
+      assert.throws(() => {
+        resolveIsolationScopeId(GROUP_A);
+      }, /APP_HMAC_PEPPER/, 'Should throw if pepper is missing');
+    } finally {
+      process.env.APP_HMAC_PEPPER = savedPepper16;
+    }
+
+    console.log('✅ Test 16 Passed.');
+
+    // =========================================================================
+    // Test 17: Abort-before-wire (throws on missing pepper)
+    // =========================================================================
+    console.log('Test 17: Verifying abort-before-wire when pepper is missing...');
+
+    const savedPepper = process.env.APP_HMAC_PEPPER;
+    delete process.env.APP_HMAC_PEPPER;
+
+    try {
+      lastProviderUrl = '';
+      await answerQuestion({
+        entityId: E1,
+        groupId: GROUP_A,
+        threadId: null,
+        question: 'Should abort',
+      });
+      assert.fail('Should have aborted on missing pepper');
+    } catch (e: any) {
+      assert.ok(e.message.includes('APP_HMAC_PEPPER'), 'Error must mention APP_HMAC_PEPPER');
+      assert.strictEqual(lastProviderUrl, '', 'No network requests must be made');
+    } finally {
+      process.env.APP_HMAC_PEPPER = savedPepper;
+    }
+
+    console.log('✅ Test 17 Passed.');
+
+    // =========================================================================
+    // Test 18: logModelCall records scope ID and type with spread priority
+    // =========================================================================
+    console.log('Test 18: Verifying logModelCall metadata spread priority...');
+
+    const testResult = {
+      text: 'Final response',
+      usage: { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'deepseek-v4-flash',
+      requestId: 'real-request-id',
+      stopReason: 'end_turn',
+      raw: {
+        isolationScopeId: 'clobbered-val',
+        requestId: 'clobbered-id',
+        telegramThreadId: 99999,
+      },
+    };
+
+    await logModelCall({
+      entityId: E1,
+      groupId: GROUP_A,
+      threadId: null,
+      botId: null,
+      callType: 'answer',
+      result: testResult,
+      providerName: 'deepseek',
+      isolationScopeId: expectedScopeId,
+    });
+
+    const calls = await sql`
+      select metadata from public.model_calls
+      where group_id = ${GROUP_A}::uuid
+      order by created_at desc
+      limit 1
+    `;
+    assert.strictEqual(calls.length, 1);
+    const loggedMetadata = calls[0].metadata;
+
+    assert.strictEqual(loggedMetadata.isolationScopeId, expectedScopeId, 'Controlled isolationScopeId must win');
+    assert.strictEqual(loggedMetadata.isolationScopeType, 'group', 'Controlled isolationScopeType must win');
+    assert.strictEqual(loggedMetadata.requestId, 'real-request-id', 'Controlled requestId must win');
+    assert.strictEqual(loggedMetadata.telegramThreadId, null, 'Controlled telegramThreadId must win');
+
+    console.log('✅ Test 18 Passed.');
 
     console.log('🎉 ALL TELEGRAM ENTITY FORMATTING TESTS PASSED SUCCESSFULLY! 🎉');
   } finally {

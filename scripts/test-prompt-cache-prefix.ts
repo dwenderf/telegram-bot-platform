@@ -8,6 +8,8 @@ import path from 'path';
 import { setMockCallModel, CallModelInput, CallModelResult } from '../lib/anthropic';
 import { answerQuestion } from '../lib/capabilities';
 
+process.env.APP_HMAC_PEPPER = 'dummy-test-pepper-high-entropy-random-string';
+
 async function main() {
   const adminUrl = process.env.ADMIN_DATABASE_URL;
   const botUrl = process.env.DATABASE_URL;

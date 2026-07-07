@@ -10,6 +10,7 @@ import { AnthropicProvider } from '../lib/providers/anthropic';
 // Setup environment variables for testing
 process.env.DEEPSEEK_API_KEY = 'dummy-deepseek-key';
 process.env.ANTHROPIC_API_KEY = 'dummy-anthropic-key';
+process.env.APP_HMAC_PEPPER = 'dummy-test-pepper-high-entropy-random-string';
 
 let lastCreateParams: any = null;
 let lastCreateOptions: any = null;
@@ -73,6 +74,7 @@ async function main() {
     userMessage: 'Hello DeepSeek',
     model: 'deepseek-v4-flash',
     cacheable: true, // Should be ignored
+    isolationScopeId: 'dummy-scope-id',
   });
 
   // Verify thinking is disabled
@@ -127,6 +129,7 @@ async function main() {
     userMessage: 'Test usage mapping',
     model: 'deepseek-v4-flash',
     cacheable: false,
+    isolationScopeId: 'dummy-scope-id',
   });
 
   assert.strictEqual(result3.usage.input_tokens, 500, 'input_tokens should map correctly');
@@ -156,6 +159,7 @@ async function main() {
     userMessage: 'Test metadata',
     model: 'deepseek-v4-pro',
     cacheable: false,
+    isolationScopeId: 'dummy-scope-id',
   });
 
   assert.strictEqual(result4.model, 'deepseek-v4-pro', 'Result model name must match the response model verbatim');
@@ -187,6 +191,7 @@ async function main() {
     userMessage: 'Test text extraction',
     model: 'deepseek-v4-flash',
     cacheable: false,
+    isolationScopeId: 'dummy-scope-id',
   });
 
   assert.strictEqual(
@@ -246,6 +251,7 @@ async function main() {
     userMessage: '',
     model: '',
     cacheable: false,
+    isolationScopeId: 'dummy-scope-id',
   });
   assert.strictEqual(mockResult.text, 'Mocked output', 'Mock provider must execute the mock callback');
 

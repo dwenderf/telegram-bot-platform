@@ -10,6 +10,9 @@ import path from 'path';
 import { setMockCallModel } from '../lib/anthropic';
 import { answerQuestion, recapConversation } from '../lib/capabilities';
 
+// Setup environment variables for testing
+process.env.APP_HMAC_PEPPER = 'dummy-test-pepper-high-entropy-random-string';
+
 // Global mock metrics we can update during tests
 let mockUsage = {
   input_tokens: 100,

@@ -47,6 +47,7 @@ export class DeepSeekProvider implements ModelProvider {
               content: input.userMessage,
             },
           ],
+          metadata: { user_id: input.isolationScopeId },
           // Cast to any since thinking API might not be present on older SDK types
           thinking: { type: 'disabled' },
         } as any

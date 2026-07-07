@@ -2,15 +2,19 @@ import Anthropic from '@anthropic-ai/sdk';
 import { ModelProvider, CallModelInput, CallModelResult } from '../model';
 import { getModelMaxOutputTokens } from '../config';
 
-const apiKey = process.env.ANTHROPIC_API_KEY;
-
-if (!apiKey) {
-  console.warn('Warning: ANTHROPIC_API_KEY is not set in environment variables.');
+let anthropicInstance: Anthropic | null = null;
+function getAnthropicInstance(): Anthropic {
+  if (!anthropicInstance) {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      console.warn('Warning: ANTHROPIC_API_KEY is not set in environment variables.');
+    }
+    anthropicInstance = new Anthropic({
+      apiKey: apiKey || 'dummy-key',
+    });
+  }
+  return anthropicInstance;
 }
-
-const anthropic = new Anthropic({
-  apiKey: apiKey || 'dummy-key',
-});
 
 export class AnthropicProvider implements ModelProvider {
   readonly name = 'anthropic';
@@ -35,7 +39,7 @@ export class AnthropicProvider implements ModelProvider {
         headers['anthropic-beta'] = 'prompt-caching-2024-07-31';
       }
 
-      const response = await anthropic.messages.create(
+      const response = await getAnthropicInstance().messages.create(
         {
           model: input.model,
           max_tokens: getModelMaxOutputTokens(),
@@ -46,6 +50,7 @@ export class AnthropicProvider implements ModelProvider {
               content: input.userMessage,
             },
           ],
+          metadata: { user_id: input.isolationScopeId },
         },
         {
           headers,

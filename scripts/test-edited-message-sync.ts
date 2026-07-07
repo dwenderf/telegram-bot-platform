@@ -1,4 +1,5 @@
 process.env.ANTHROPIC_API_KEY = 'dummy-test-key';
+process.env.APP_HMAC_PEPPER = 'dummy-test-pepper-high-entropy-random-string';
 
 import postgres from 'postgres';
 import assert from 'assert';
