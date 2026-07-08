@@ -215,3 +215,129 @@ export async function getChatMember(
     user_id: Number(userId),
   });
 }
+
+export const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
+export const INTER_CHUNK_DELAY_MS = 250;
+
+/**
+ * Splits a message text and its associated entities into chunks, each fitting within the limit.
+ * Preserves exact code units/characters and rebases/splits absolute entity offsets.
+ */
+export function splitFormattedMessage(
+  text: string,
+  entities: TelegramMessageEntity[],
+  limit = TELEGRAM_MAX_MESSAGE_LENGTH
+): Array<{ text: string; entities: TelegramMessageEntity[] }> {
+  if (text.length <= limit) {
+    return [{ text, entities: [...entities] }];
+  }
+
+  const chunks: Array<{ text: string; entities: TelegramMessageEntity[] }> = [];
+  let pos = 0;
+
+  while (pos < text.length) {
+    let end = pos + limit;
+    if (end >= text.length) {
+      end = text.length;
+    } else {
+      // Find a nice boundary inside (pos, end]
+      const sliced = text.slice(pos, end);
+      
+      let boundaryIndex = sliced.lastIndexOf('\n\n');
+      if (boundaryIndex !== -1 && boundaryIndex > 0) {
+        end = pos + boundaryIndex + 2;
+      } else {
+        boundaryIndex = sliced.lastIndexOf('\n');
+        if (boundaryIndex !== -1 && boundaryIndex > 0) {
+          end = pos + boundaryIndex + 1;
+        } else {
+          boundaryIndex = sliced.lastIndexOf(' ');
+          if (boundaryIndex !== -1 && boundaryIndex > 0) {
+            end = pos + boundaryIndex + 1;
+          }
+        }
+      }
+
+      // Surrogate pair safety: do not split between high surrogate at end-1 and low surrogate at end
+      if (end < text.length) {
+        const codeBefore = text.charCodeAt(end - 1);
+        const codeAfter = text.charCodeAt(end);
+        if (codeBefore >= 0xD800 && codeBefore <= 0xDBFF && codeAfter >= 0xDC00 && codeAfter <= 0xDFFF) {
+          end--;
+        }
+      }
+    }
+
+    const chunkText = text.slice(pos, end);
+    const chunkEntities: TelegramMessageEntity[] = [];
+
+    for (const e of entities) {
+      const overlapStart = Math.max(e.offset, pos);
+      const overlapEnd = Math.min(e.offset + e.length, end);
+      if (overlapEnd > overlapStart) {
+        chunkEntities.push({
+          ...e,
+          offset: overlapStart - pos,
+          length: overlapEnd - overlapStart,
+        });
+      }
+    }
+
+    chunks.push({ text: chunkText, entities: chunkEntities });
+    pos = end;
+  }
+
+  return chunks;
+}
+
+/**
+ * Sequential transport wrapper that splits a formatted message and sends chunks individually
+ * with typing action indicators and delay between chunks.
+ */
+export async function sendFormattedMessage(
+  token: string,
+  chatId: bigint | number,
+  payload: { text: string; entities: TelegramMessageEntity[] },
+  options: {
+    threadId?: bigint | number;
+    replyToMessageId?: number;
+    interChunkDelayMs?: number;
+    typingBetween?: boolean;
+    limit?: number;
+  } = {}
+): Promise<any[]> {
+  const {
+    threadId,
+    replyToMessageId,
+    interChunkDelayMs = INTER_CHUNK_DELAY_MS,
+    typingBetween = true,
+    limit = TELEGRAM_MAX_MESSAGE_LENGTH,
+  } = options;
+
+  const chunks = splitFormattedMessage(payload.text, payload.entities, limit);
+  const results: any[] = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    if (i > 0) {
+      if (typingBetween) {
+        try {
+          await sendChatAction(token, chatId, 'typing', threadId);
+        } catch (err) {
+          console.error('Failed to send typing chat action between chunks:', err);
+        }
+      }
+      if (interChunkDelayMs > 0) {
+        await new Promise((r) => setTimeout(r, interChunkDelayMs));
+      }
+    }
+
+    const res = await sendMessage(token, chatId, chunks[i].text, {
+      threadId,
+      replyToMessageId: i === 0 ? replyToMessageId : undefined,
+      entities: chunks[i].entities,
+    });
+    results.push(res);
+  }
+
+  return results;
+}

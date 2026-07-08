@@ -21,6 +21,7 @@ import {
   sendDocument,
   sanitizeForTelegramHtml,
   getChatMember,
+  sendFormattedMessage,
 } from '@/lib/telegram';
 import { getModelIdentifier } from '@/lib/config';
 
@@ -638,11 +639,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               note: note || null,
             });
 
-            await sendMessage(
+            await sendFormattedMessage(
               bot.telegram_bot_token,
               message.chat.id,
-              text,
-              { threadId, replyToMessageId: message.message_id, entities }
+              { text, entities },
+              { threadId, replyToMessageId: message.message_id }
             );
 
             try {
@@ -708,11 +709,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               botId,
             });
 
-            await sendMessage(bot.telegram_bot_token, message.chat.id, text, {
-              threadId: threadId,
-              replyToMessageId: message.message_id,
-              entities,
-            });
+            await sendFormattedMessage(
+              bot.telegram_bot_token,
+              message.chat.id,
+              { text, entities },
+              { threadId, replyToMessageId: message.message_id }
+            );
 
             try {
               await logBotResponse({
