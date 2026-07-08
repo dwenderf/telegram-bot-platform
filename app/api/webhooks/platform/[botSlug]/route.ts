@@ -12,6 +12,7 @@ import {
   resolveBotIdBySlug,
   resolveEntityIdByChat,
   updateLoggedMessage,
+  registerThread,
 } from '@/lib/capabilities';
 import {
   setMessageReaction,
@@ -131,6 +132,63 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         }
       }
       return NextResponse.json({ ok: true, msg: 'Edit synced' });
+    }
+
+    // Handle service messages (forum topic created, edited, chat renamed)
+    if (message && message.chat) {
+      const isTopicCreated = !!message.forum_topic_created;
+      const isTopicEdited = !!message.forum_topic_edited;
+      const isGroupRenamed = message.new_chat_title !== undefined && message.new_chat_title !== null;
+
+      if (isTopicCreated || isTopicEdited || isGroupRenamed) {
+        const entityId = await resolveEntityIdByChat(message.chat.id);
+        if (entityId) {
+          await withTenantContext(entityId, async (tx) => {
+            const groupRows = await tx<any[]>`
+              select id from public.groups where telegram_chat_id = ${message.chat.id.toString()}
+            `;
+            const groupRow = groupRows[0];
+            if (groupRow) {
+              const groupId = groupRow.id;
+
+              if (isTopicCreated) {
+                const created = message.forum_topic_created;
+                const threadId = message.message_thread_id !== undefined ? message.message_thread_id : null;
+                if (threadId !== null && threadId !== undefined) {
+                  await registerThread(tx, {
+                    entityId,
+                    groupId,
+                    telegramThreadId: threadId,
+                    name: created.name,
+                    iconColor: created.icon_color,
+                    iconCustomEmojiId: created.icon_custom_emoji_id,
+                  });
+                }
+              } else if (isTopicEdited) {
+                const edited = message.forum_topic_edited;
+                const threadId = message.message_thread_id !== undefined ? message.message_thread_id : null;
+                if (threadId !== null && threadId !== undefined) {
+                  await registerThread(tx, {
+                    entityId,
+                    groupId,
+                    telegramThreadId: threadId,
+                    name: edited.name,
+                    iconColor: null,
+                    iconCustomEmojiId: edited.icon_custom_emoji_id,
+                  });
+                }
+              } else if (isGroupRenamed) {
+                await tx`
+                  update public.groups
+                  set display_name = ${message.new_chat_title}
+                  where id = ${groupId}::uuid
+                `;
+              }
+            }
+          });
+        }
+        return NextResponse.json({ ok: true, msg: 'Service message handled' });
+      }
     }
 
     if (!message || !message.chat || !message.text) {

@@ -1,3 +1,4 @@
+import postgres from 'postgres';
 import { sql, withTenantContext } from './supabase';
 import { resolveProvider, CallModelResult } from './model';
 import { getModelIdentifier, getContextMessageHistoryLimit } from './config';
@@ -390,6 +391,44 @@ ${input.question}`;
 }
 
 /**
+ * Idempotently registers a thread row on sight, and captures/refreshes its name and icon color/emoji details.
+ * Kept inside withTenantContext(entityId) to share transactions and security contexts.
+ */
+export async function registerThread(
+  tx: postgres.TransactionSql,
+  input: {
+    entityId: string;
+    groupId: string;
+    telegramThreadId: bigint | number | string;
+    name?: string | null;
+    iconColor?: number | null;
+    iconCustomEmojiId?: string | null;
+  }
+): Promise<void> {
+  const threadIdStr = input.telegramThreadId.toString();
+  const name = input.name || null;
+  const iconColor = input.iconColor !== undefined && input.iconColor !== null ? input.iconColor : null;
+  const emojiId = input.iconCustomEmojiId === '' ? null : (input.iconCustomEmojiId || null);
+
+  await tx`
+    insert into public.threads (
+      entity_id, group_id, telegram_thread_id, name, icon_color, icon_custom_emoji_id
+    ) values (
+      ${input.entityId}::uuid,
+      ${input.groupId}::uuid,
+      ${threadIdStr}::bigint,
+      ${name},
+      ${iconColor},
+      ${emojiId}
+    )
+    on conflict (group_id, telegram_thread_id) do update set
+      name                 = coalesce(excluded.name, threads.name),
+      icon_color           = coalesce(excluded.icon_color, threads.icon_color),
+      icon_custom_emoji_id = coalesce(excluded.icon_custom_emoji_id, threads.icon_custom_emoji_id)
+  `;
+}
+
+/**
  * Log an incoming message.
  */
 export async function logMessage(input: {
@@ -435,6 +474,14 @@ export async function logMessage(input: {
         ${messageIdStr}::bigint
       )
     `;
+
+    if (input.telegramThreadId !== null && input.telegramThreadId !== undefined) {
+      await registerThread(tx, {
+        entityId: input.entityId,
+        groupId: input.groupId,
+        telegramThreadId: input.telegramThreadId,
+      });
+    }
   });
 }
 
