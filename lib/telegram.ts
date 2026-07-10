@@ -341,3 +341,55 @@ export async function sendFormattedMessage(
 
   return results;
 }
+
+export const TELEGRAM_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
+
+/**
+ * Fetches the internal path and file size of a Telegram file using standard getFile.
+ */
+export async function getTelegramFilePath(
+  token: string,
+  fileId: string
+): Promise<{ file_path: string; file_size: number }> {
+  const response = await callTelegramApi(token, 'getFile', { file_id: fileId });
+  if (!response.ok || !response.result) {
+    throw new Error(`Telegram getFile call failed: ${JSON.stringify(response)}`);
+  }
+  return {
+    file_path: response.result.file_path,
+    file_size: response.result.file_size,
+  };
+}
+
+/**
+ * Downloads a Telegram file, base64 encodes it, and verifies download caps.
+ * Never logs the token or file_path URLs.
+ */
+export async function downloadTelegramFile(
+  token: string,
+  fileId: string,
+  maxBytes = TELEGRAM_MAX_DOWNLOAD_BYTES
+): Promise<{ data: string; byteLength: number }> {
+  const { file_path, file_size } = await getTelegramFilePath(token, fileId);
+
+  if (file_size > maxBytes) {
+    throw new Error(`File size ${file_size} bytes exceeds the maximum download cap of ${maxBytes} bytes.`);
+  }
+
+  const url = `https://api.telegram.org/file/bot${token}/${file_path}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download Telegram file: HTTP ${response.status}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  if (arrayBuffer.byteLength > maxBytes) {
+    throw new Error(`Downloaded byte length ${arrayBuffer.byteLength} exceeds the maximum download cap of ${maxBytes} bytes.`);
+  }
+
+  const buffer = Buffer.from(arrayBuffer);
+  return {
+    data: buffer.toString('base64'),
+    byteLength: buffer.byteLength,
+  };
+}

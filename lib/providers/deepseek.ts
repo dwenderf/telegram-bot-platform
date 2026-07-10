@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { ModelProvider, CallModelInput, CallModelResult } from '../model';
+import { ModelProvider, CallModelInput, CallModelResult, DocumentUnsupportedError } from '../model';
 import { getModelMaxOutputTokens } from '../config';
 
 export class DeepSeekProvider implements ModelProvider {
@@ -23,6 +23,10 @@ export class DeepSeekProvider implements ModelProvider {
   }
 
   async callModel(input: CallModelInput): Promise<CallModelResult> {
+    if (input.document) {
+      throw new DocumentUnsupportedError('DeepSeek provider does not support raw document ingestion.');
+    }
+
     try {
       // DeepSeek caching is automatic/prefix-based. We do NOT attach
       // cache_control to the system prompt blocks.

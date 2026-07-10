@@ -13,6 +13,7 @@ import {
   resolveEntityIdByChat,
   updateLoggedMessage,
   registerThread,
+  answerAboutDocument,
 } from '@/lib/capabilities';
 import {
   setMessageReaction,
@@ -22,8 +23,11 @@ import {
   sanitizeForTelegramHtml,
   getChatMember,
   sendFormattedMessage,
+  downloadTelegramFile,
+  TELEGRAM_MAX_DOWNLOAD_BYTES,
 } from '@/lib/telegram';
-import { getModelIdentifier } from '@/lib/config';
+import { getModelIdentifier, ANTHROPIC_DOCUMENT_MODEL } from '@/lib/config';
+import { DocumentReadError } from '@/lib/model';
 
 const DEFAULT_RECAP = 20;
 const MAX_RECAP = 100;
@@ -699,39 +703,134 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               await resolveUser(entity.id, group.id, message.from);
             }
 
-            const { text, entities } = await answerQuestion({
-              entityId: entity.id,
-              groupId: group.id,
-              threadId: threadId,
-              question: question,
-              model: bot.model,
-              persona: bot.persona,
-              botId,
-            });
+            const replyToDoc = message.reply_to_message?.document;
+            if (replyToDoc) {
+              // 1. MIME check
+              if (replyToDoc.mime_type !== 'application/pdf') {
+                await sendMessage(
+                  bot.telegram_bot_token,
+                  message.chat.id,
+                  'I can only read PDF documents right now.',
+                  { threadId, replyToMessageId: message.message_id }
+                );
+                return;
+              }
 
-            await sendFormattedMessage(
-              bot.telegram_bot_token,
-              message.chat.id,
-              { text, entities },
-              { threadId, replyToMessageId: message.message_id }
-            );
+              // 2. Size check
+              if (replyToDoc.file_size && replyToDoc.file_size > TELEGRAM_MAX_DOWNLOAD_BYTES) {
+                await sendMessage(
+                  bot.telegram_bot_token,
+                  message.chat.id,
+                  'That file is too large for me to read (max 20 MB).',
+                  { threadId, replyToMessageId: message.message_id }
+                );
+                return;
+              }
 
-            try {
-              await logBotResponse({
+              // 3. Download
+              const fileData = await downloadTelegramFile(bot.telegram_bot_token, replyToDoc.file_id);
+
+              // 4. Document QA
+              let docResult;
+              try {
+                docResult = await answerAboutDocument({
+                  entityId: entity.id,
+                  groupId: group.id,
+                  threadId,
+                  question,
+                  document: {
+                    data: fileData.data,
+                    mediaType: 'application/pdf',
+                  },
+                  botId,
+                });
+              } catch (err: any) {
+                if (err instanceof DocumentReadError) {
+                  if (err.reason === 'too_many_pages') {
+                    await sendMessage(
+                      bot.telegram_bot_token,
+                      message.chat.id,
+                      'That PDF has too many pages for me to read — the limit is 100 pages.',
+                      { threadId, replyToMessageId: message.message_id }
+                    );
+                  } else if (err.reason === 'unreadable') {
+                    await sendMessage(
+                      bot.telegram_bot_token,
+                      message.chat.id,
+                      'I was unable to read that PDF. Please ensure it is not password-protected or corrupt.',
+                      { threadId, replyToMessageId: message.message_id }
+                    );
+                  } else {
+                    throw err; // transient
+                  }
+                  return;
+                }
+                throw err;
+              }
+
+              // 5. Send formatted reply
+              await sendFormattedMessage(
+                bot.telegram_bot_token,
+                message.chat.id,
+                { text: docResult.text, entities: docResult.entities },
+                { threadId, replyToMessageId: message.message_id }
+              );
+
+              // 6. Log response
+              try {
+                await logBotResponse({
+                  entityId: entity.id,
+                  groupId: group.id,
+                  telegramChatId: message.chat.id,
+                  telegramThreadId: threadId,
+                  botUsername: bot.telegram_username,
+                  messageText: docResult.text,
+                  summary: null,
+                  generationMetadata: {
+                    model: ANTHROPIC_DOCUMENT_MODEL,
+                    thread_id: threadId,
+                    kind: 'document_qa',
+                  },
+                });
+              } catch (logErr) {
+                console.error('Failed to log bot response for document QA:', logErr);
+              }
+            } else {
+              // Normal answer flow
+              const { text, entities } = await answerQuestion({
                 entityId: entity.id,
                 groupId: group.id,
-                telegramChatId: message.chat.id,
-                telegramThreadId: threadId,
-                botUsername: bot.telegram_username,
-                messageText: text,
-                summary: null,
-                generationMetadata: {
-                  model: bot.model || getModelIdentifier(),
-                  thread_id: threadId,
-                },
+                threadId: threadId,
+                question: question,
+                model: bot.model,
+                persona: bot.persona,
+                botId,
               });
-            } catch (err) {
-              console.error('Failed to log bot response:', err);
+
+              await sendFormattedMessage(
+                bot.telegram_bot_token,
+                message.chat.id,
+                { text, entities },
+                { threadId, replyToMessageId: message.message_id }
+              );
+
+              try {
+                await logBotResponse({
+                  entityId: entity.id,
+                  groupId: group.id,
+                  telegramChatId: message.chat.id,
+                  telegramThreadId: threadId,
+                  botUsername: bot.telegram_username,
+                  messageText: text,
+                  summary: null,
+                  generationMetadata: {
+                    model: bot.model || getModelIdentifier(),
+                    thread_id: threadId,
+                  },
+                });
+              } catch (err) {
+                console.error('Failed to log bot response:', err);
+              }
             }
           } catch (err: any) {
             console.error('Error handling async answer workflow:', err);

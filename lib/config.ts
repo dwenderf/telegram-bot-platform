@@ -36,3 +36,7 @@ export function getModelMaxOutputTokens(): number {
 export function getContextMessageHistoryLimit(): number {
   return parsePositiveInteger(process.env.CONTEXT_MESSAGE_HISTORY_LIMIT, 30);
 }
+
+// Model for document reads (Anthropic-only capability). Not an operator preference —
+// hardcoded, not an env var. Update here on deprecation; flagged in the README.
+export const ANTHROPIC_DOCUMENT_MODEL = 'claude-sonnet-5';

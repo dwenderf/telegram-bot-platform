@@ -1,7 +1,7 @@
 import postgres from 'postgres';
 import { sql, withTenantContext } from './supabase';
-import { resolveProvider, CallModelResult } from './model';
-import { getModelIdentifier, getContextMessageHistoryLimit } from './config';
+import { resolveProvider, CallModelResult, DocumentReadError } from './model';
+import { getModelIdentifier, getContextMessageHistoryLimit, ANTHROPIC_DOCUMENT_MODEL } from './config';
 import { resolveIsolationScopeId, ISOLATION_SCOPE_TYPE } from './isolation';
 import { htmlToFormattable } from '@gramio/format/html';
 import { markdownToFormattable } from '@gramio/format/markdown';
@@ -371,6 +371,76 @@ ${input.question}`;
     cacheable: true,
     isolationScopeId,
   });
+
+  await logModelCall({
+    entityId: input.entityId,
+    groupId: input.groupId,
+    threadId: input.threadId,
+    botId: input.botId,
+    callType: 'answer',
+    result,
+    providerName: provider.name,
+    isolationScopeId,
+  });
+
+  const rendered = renderModelOutput(result.text, provider.outputFormat);
+  return {
+    text: rendered.text,
+    entities: rendered.entities,
+  };
+}
+
+/**
+ * Answers a user's question about a provided PDF document.
+ * This read is isolated from conversation history and project manifests.
+ */
+export async function answerAboutDocument(input: {
+  entityId: string;
+  groupId: string;
+  threadId: bigint | number | string | null;
+  question: string;
+  document: { data: string; mediaType: string };
+  botId?: string | null;
+}): Promise<{ text: string; entities: TelegramMessageEntity[] }> {
+  const isolationScopeId = resolveIsolationScopeId(input.groupId);
+
+  let model = getModelIdentifier();
+  if (resolveProvider(model).name !== 'anthropic') {
+    model = ANTHROPIC_DOCUMENT_MODEL;
+  }
+  const provider = resolveProvider(model);
+
+  const docPersona = `Read the attached document and answer the user's question about it. If they haven't asked something specific, give a clear, well-organized overview.`;
+  const systemPrompt = `${docPersona}
+
+${formatRulesFor(provider.outputFormat)}`;
+
+  const userMessage = input.question.trim() ? input.question.trim() : `Provide a clear overview of this document.`;
+
+  let result: CallModelResult;
+  try {
+    result = await provider.callModel({
+      systemPrompt,
+      userMessage,
+      model,
+      cacheable: false,
+      isolationScopeId,
+      document: input.document,
+    });
+  } catch (err: any) {
+    // Classify error mapping to DocumentReadError
+    const msg = err.message || '';
+    const isPageLimit = msg.includes('100 PDF pages');
+    const isInvalidRequest = err.status === 400 || msg.toLowerCase().includes('invalid_request_error');
+
+    if (isPageLimit) {
+      throw new DocumentReadError('too_many_pages', msg);
+    } else if (isInvalidRequest) {
+      throw new DocumentReadError('unreadable', msg);
+    } else {
+      throw new DocumentReadError('transient', msg);
+    }
+  }
 
   await logModelCall({
     entityId: input.entityId,

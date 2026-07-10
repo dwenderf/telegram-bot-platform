@@ -1,5 +1,8 @@
 # Telegram Bot Platform
 
+> [!WARNING]
+> **Model Capability Warning**: The hardcoded document capability model (`ANTHROPIC_DOCUMENT_MODEL` = `'claude-sonnet-5'`) is defined in `lib/config.ts`. If this model is deprecated by Anthropic, it must be updated in `lib/config.ts` to prevent document Q&A failures.
+
 A multi-tenant platform for AI assistants embedded in Telegram groups, where each assistant answers questions grounded in a team's own documentation hosted on GitHub.
 
 Built with **Next.js 15 (App Router / Headless API)** and **Supabase (Postgres)**.

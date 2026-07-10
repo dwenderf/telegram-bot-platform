@@ -47,7 +47,22 @@ export class AnthropicProvider implements ModelProvider {
           messages: [
             {
               role: 'user',
-              content: input.userMessage,
+              content: input.document
+                ? [
+                    {
+                      type: 'document',
+                      source: {
+                        type: 'base64',
+                        media_type: input.document.mediaType as 'application/pdf',
+                        data: input.document.data,
+                      },
+                    },
+                    {
+                      type: 'text',
+                      text: input.userMessage,
+                    },
+                  ]
+                : input.userMessage,
             },
           ],
           metadata: { user_id: input.isolationScopeId },
@@ -79,7 +94,7 @@ export class AnthropicProvider implements ModelProvider {
       };
     } catch (error: any) {
       console.error('Anthropic API call failed:', error);
-      throw new Error(`Failed to generate answer from Anthropic: ${error.message}`);
+      throw error;
     }
   }
 }

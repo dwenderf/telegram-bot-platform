@@ -1,12 +1,30 @@
 import { AnthropicProvider } from './providers/anthropic';
 import { DeepSeekProvider } from './providers/deepseek';
 
+export class DocumentUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DocumentUnsupportedError';
+  }
+}
+
+export class DocumentReadError extends Error {
+  constructor(
+    public reason: 'too_many_pages' | 'unreadable' | 'transient',
+    message: string
+  ) {
+    super(message);
+    this.name = 'DocumentReadError';
+  }
+}
+
 export interface CallModelInput {
   systemPrompt: string;
   userMessage: string;
   model: string;
   cacheable: boolean;
   isolationScopeId: string; // required; produced only by resolveIsolationScopeId()
+  document?: { data: string; mediaType: string };
 }
 
 export interface CallModelResult {
