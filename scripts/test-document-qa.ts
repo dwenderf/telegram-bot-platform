@@ -15,7 +15,7 @@ global.fetch = async (url: any, options: any) => {
     if (urlStr.includes(key)) {
       const responseData = currentMockResponses[key];
       if (responseData instanceof Response) {
-        return responseData;
+        return responseData.clone();
       }
       return new Response(
         typeof responseData === 'string' ? responseData : JSON.stringify(responseData),
@@ -68,24 +68,24 @@ async function main() {
   console.log('--- Starting Ephemeral Document Q&A Test Suite ---');
 
   // Load modules dynamically so that Anthropic SDK captures our mocked global.fetch
-  const routeMod = await import('../app/api/webhooks/platform/[botSlug]/route');
+  const routeMod = await import('../app/api/webhooks/platform/[botSlug]/route.js');
   POST = routeMod.POST;
 
-  const modelMod = await import('../lib/model');
+  const modelMod = await import('../lib/model.js');
   DocumentUnsupportedError = modelMod.DocumentUnsupportedError;
   DocumentReadError = modelMod.DocumentReadError;
 
-  const telegramMod = await import('../lib/telegram');
+  const telegramMod = await import('../lib/telegram.js');
   downloadTelegramFile = telegramMod.downloadTelegramFile;
   TELEGRAM_MAX_DOWNLOAD_BYTES = telegramMod.TELEGRAM_MAX_DOWNLOAD_BYTES;
 
-  const capsMod = await import('../lib/capabilities');
+  const capsMod = await import('../lib/capabilities.js');
   answerAboutDocument = capsMod.answerAboutDocument;
 
-  const anthropicMod = await import('../lib/providers/anthropic');
+  const anthropicMod = await import('../lib/providers/anthropic.js');
   AnthropicProvider = anthropicMod.AnthropicProvider;
 
-  const deepseekMod = await import('../lib/providers/deepseek');
+  const deepseekMod = await import('../lib/providers/deepseek.js');
   DeepSeekProvider = deepseekMod.DeepSeekProvider;
 
   const adminUrl = process.env.ADMIN_DATABASE_URL || '';

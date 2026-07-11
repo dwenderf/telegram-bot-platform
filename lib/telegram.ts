@@ -393,3 +393,78 @@ export async function downloadTelegramFile(
     byteLength: buffer.byteLength,
   };
 }
+
+/**
+ * Edits an existing message's text, adhering to entities-XOR-parseMode.
+ */
+export async function editMessageText(
+  token: string,
+  chatId: number | string,
+  messageId: number,
+  text: string,
+  options: { entities?: TelegramMessageEntity[]; parseMode?: 'HTML' | 'MarkdownV2' } = {}
+): Promise<any> {
+  const { entities, parseMode } = options;
+  const body: any = {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+  };
+  if (entities) {
+    body.entities = entities;
+  } else if (parseMode) {
+    body.parse_mode = parseMode;
+  }
+  return callTelegramApi(token, 'editMessageText', body);
+}
+
+/**
+ * Deletes a message.
+ */
+export async function deleteMessage(
+  token: string,
+  chatId: number | string,
+  messageId: number
+): Promise<any> {
+  return callTelegramApi(token, 'deleteMessage', {
+    chat_id: chatId,
+    message_id: messageId,
+  });
+}
+
+/**
+ * Periodically keeps the typing chat action alive until stopped.
+ * Best-effort. Returns a stop function.
+ */
+export function startTypingKeepalive(
+  token: string,
+  chatId: number | string,
+  threadId?: bigint | number | string | null,
+  intervalMs = 4000
+): () => void {
+  const cid = typeof chatId === 'string' ? BigInt(chatId) : chatId;
+  let tid: bigint | number | undefined;
+  if (threadId !== null && threadId !== undefined) {
+    if (typeof threadId === 'string') {
+      tid = /^\d+$/.test(threadId) ? BigInt(threadId) : undefined;
+    } else {
+      tid = threadId;
+    }
+  }
+
+  const fire = () => {
+    sendChatAction(token, cid, 'typing', tid).catch((err) => {
+      console.error('Failed to send typing chat action in keep-alive:', err);
+    });
+  };
+
+  fire();
+  const interval = setInterval(fire, intervalMs);
+
+  let stopped = false;
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(interval);
+  };
+}

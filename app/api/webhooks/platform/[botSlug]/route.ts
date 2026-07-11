@@ -25,6 +25,11 @@ import {
   sendFormattedMessage,
   downloadTelegramFile,
   TELEGRAM_MAX_DOWNLOAD_BYTES,
+  editMessageText,
+  deleteMessage,
+  startTypingKeepalive,
+  splitFormattedMessage,
+  type TelegramMessageEntity,
 } from '@/lib/telegram';
 import { getModelIdentifier, ANTHROPIC_DOCUMENT_MODEL } from '@/lib/config';
 import { DocumentReadError } from '@/lib/model';
@@ -196,21 +201,30 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
     }
 
-    if (!message || !message.chat || !message.text) {
+    if (!message || !message.chat) {
       return NextResponse.json({ ok: true });
     }
 
-    const text = message.text.trim();
     const botUsername = bot.telegram_username;
+    const rawText = message.text?.trim() ?? null;
+    const rawCaption = message.caption?.trim() ?? null;
+    const captionMentionsBot = !!(message.document && rawCaption && botUsername && rawCaption.includes('@' + botUsername));
+
+    if (!rawText && !captionMentionsBot) {
+      return NextResponse.json({ ok: true });
+    }
+
+    const effectiveText = rawText ?? rawCaption ?? '';
+    const text = effectiveText;
     const threadId = message.message_thread_id !== undefined ? message.message_thread_id : null;
 
     // Determine intents
-    const isHelpCommand = text.startsWith('/help');
-    const isContextCommand = text.startsWith('/context');
-    const isWhoamiCommand = text.startsWith('/whoami');
-    const isAuthCommand = text.startsWith('/auth');
-    const isRecapCommand = text.startsWith('/recap');
-    const isMention = botUsername ? text.includes(`@${botUsername}`) : false;
+    const isHelpCommand = rawText ? rawText.startsWith('/help') : false;
+    const isContextCommand = rawText ? rawText.startsWith('/context') : false;
+    const isWhoamiCommand = rawText ? rawText.startsWith('/whoami') : false;
+    const isAuthCommand = rawText ? rawText.startsWith('/auth') : false;
+    const isRecapCommand = rawText ? rawText.startsWith('/recap') : false;
+    const isMention = botUsername ? effectiveText.includes(`@${botUsername}`) : false;
 
     let isCommand = false;
     let isBotMention = false;
@@ -228,7 +242,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       isCommand = true;
     } else if (isMention) {
       isBotMention = true;
-      question = text.replace(new RegExp(`@${botUsername}\\s*`, 'gi'), '');
+      question = effectiveText.replace(new RegExp(`@${botUsername}\\s*`, 'gi'), '').trim();
     }
 
     // 4. Resolve entity ID from the group chat ID (S2)
@@ -703,10 +717,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               await resolveUser(entity.id, group.id, message.from);
             }
 
-            const replyToDoc = message.reply_to_message?.document;
-            if (replyToDoc) {
+            const targetDoc = message.document ?? message.reply_to_message?.document;
+            if (targetDoc) {
               // 1. MIME check
-              if (replyToDoc.mime_type !== 'application/pdf') {
+              if (targetDoc.mime_type !== 'application/pdf') {
                 await sendMessage(
                   bot.telegram_bot_token,
                   message.chat.id,
@@ -717,7 +731,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               }
 
               // 2. Size check
-              if (replyToDoc.file_size && replyToDoc.file_size > TELEGRAM_MAX_DOWNLOAD_BYTES) {
+              if (targetDoc.file_size && targetDoc.file_size > TELEGRAM_MAX_DOWNLOAD_BYTES) {
                 await sendMessage(
                   bot.telegram_bot_token,
                   message.chat.id,
@@ -727,13 +741,59 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                 return;
               }
 
-              // 3. Download
-              const fileData = await downloadTelegramFile(bot.telegram_bot_token, replyToDoc.file_id);
+              let statusId: number | null = null;
+              let stopKeepalive: (() => void) | null = null;
 
-              // 4. Document QA
-              let docResult;
+              // Helpers for safe edit/delete
+              const safeEdit = async (text: string, entities?: TelegramMessageEntity[]) => {
+                if (!statusId) return;
+                try {
+                  await editMessageText(
+                    bot.telegram_bot_token,
+                    message.chat.id,
+                    statusId,
+                    text,
+                    { entities }
+                  );
+                } catch (editErr) {
+                  console.error('Failed to edit status message:', editErr);
+                }
+              };
+
+              const safeDelete = async () => {
+                if (!statusId) return;
+                try {
+                  await deleteMessage(bot.telegram_bot_token, message.chat.id, statusId);
+                } catch (deleteErr) {
+                  console.error('Failed to delete status message:', deleteErr);
+                }
+              };
+
               try {
-                docResult = await answerAboutDocument({
+                // Send status, best-effort
+                try {
+                  const statusMsg = await sendMessage(
+                    bot.telegram_bot_token,
+                    message.chat.id,
+                    '📄 Downloading your document. One moment…',
+                    { threadId, replyToMessageId: message.message_id }
+                  );
+                  statusId = statusMsg?.result?.message_id ?? null;
+                } catch (statusErr) {
+                  console.error('Failed to send downloading status:', statusErr);
+                }
+
+                // Download
+                const fileData = await downloadTelegramFile(bot.telegram_bot_token, targetDoc.file_id);
+
+                // Edit status to reading
+                await safeEdit('✅ Download complete. Reading it now and formulating a response…');
+
+                // Start keep-alive
+                stopKeepalive = startTypingKeepalive(bot.telegram_bot_token, message.chat.id, threadId);
+
+                // Model read
+                const docResult = await answerAboutDocument({
                   entityId: entity.id,
                   groupId: group.id,
                   threadId,
@@ -744,56 +804,86 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                   },
                   botId,
                 });
+
+                // Early stop keep-alive
+                if (stopKeepalive) {
+                  stopKeepalive();
+                  stopKeepalive = null;
+                }
+
+                // Terminal success
+                const chunks = splitFormattedMessage(docResult.text, docResult.entities);
+
+                if (chunks.length === 1 && statusId) {
+                  await safeEdit(docResult.text, docResult.entities);
+                } else {
+                  if (statusId) {
+                    await safeDelete();
+                  }
+                  await sendFormattedMessage(
+                    bot.telegram_bot_token,
+                    message.chat.id,
+                    { text: docResult.text, entities: docResult.entities },
+                    { threadId, replyToMessageId: message.message_id }
+                  );
+                }
+
+                // Log response
+                try {
+                  await logBotResponse({
+                    entityId: entity.id,
+                    groupId: group.id,
+                    telegramChatId: message.chat.id,
+                    telegramThreadId: threadId,
+                    botUsername: bot.telegram_username,
+                    messageText: docResult.text,
+                    summary: null,
+                    generationMetadata: {
+                      model: ANTHROPIC_DOCUMENT_MODEL,
+                      thread_id: threadId,
+                      kind: 'document_qa',
+                    },
+                  });
+                } catch (logErr) {
+                  console.error('Failed to log bot response for document QA:', logErr);
+                }
+
               } catch (err: any) {
+                if (stopKeepalive) {
+                  stopKeepalive();
+                  stopKeepalive = null;
+                }
+
+                console.error('Error in document QA pipeline:', err);
+
+                // Terminal error mapping
+                let errorText = '⚠️ Sorry, something went wrong while processing your request.';
                 if (err instanceof DocumentReadError) {
                   if (err.reason === 'too_many_pages') {
-                    await sendMessage(
-                      bot.telegram_bot_token,
-                      message.chat.id,
-                      'That PDF has too many pages for me to read — the limit is 100 pages.',
-                      { threadId, replyToMessageId: message.message_id }
-                    );
+                    errorText = 'That PDF has too many pages for me to read — the limit is 100 pages.';
                   } else if (err.reason === 'unreadable') {
+                    errorText = 'I was unable to read that PDF. Please ensure it is not password-protected or corrupt.';
+                  }
+                }
+
+                if (statusId) {
+                  await safeEdit(errorText);
+                } else {
+                  try {
                     await sendMessage(
                       bot.telegram_bot_token,
                       message.chat.id,
-                      'I was unable to read that PDF. Please ensure it is not password-protected or corrupt.',
-                      { threadId, replyToMessageId: message.message_id }
+                      errorText,
+                      { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
                     );
-                  } else {
-                    throw err; // transient
+                  } catch (sendErr) {
+                    console.error('Failed fallback:', sendErr);
                   }
-                  return;
                 }
-                throw err;
-              }
-
-              // 5. Send formatted reply
-              await sendFormattedMessage(
-                bot.telegram_bot_token,
-                message.chat.id,
-                { text: docResult.text, entities: docResult.entities },
-                { threadId, replyToMessageId: message.message_id }
-              );
-
-              // 6. Log response
-              try {
-                await logBotResponse({
-                  entityId: entity.id,
-                  groupId: group.id,
-                  telegramChatId: message.chat.id,
-                  telegramThreadId: threadId,
-                  botUsername: bot.telegram_username,
-                  messageText: docResult.text,
-                  summary: null,
-                  generationMetadata: {
-                    model: ANTHROPIC_DOCUMENT_MODEL,
-                    thread_id: threadId,
-                    kind: 'document_qa',
-                  },
-                });
-              } catch (logErr) {
-                console.error('Failed to log bot response for document QA:', logErr);
+              } finally {
+                if (stopKeepalive) {
+                  stopKeepalive();
+                }
               }
             } else {
               // Normal answer flow
