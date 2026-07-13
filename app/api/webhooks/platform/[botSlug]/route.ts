@@ -384,7 +384,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         let appHost = appUrl;
         try {
           appHost = new URL(appUrl).host;
-        } catch {}
+        } catch { }
 
         const infoMsg = `To link this group, generate a one-time code in the dashboard, then send <code>/auth &lt;code&gt;</code> here. Get a code at ${escapeHtml(appHost)} — only a group admin can complete linking.`;
         await sendMessage(bot.telegram_bot_token, message.chat.id, infoMsg, {
@@ -553,9 +553,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             `• Use <code>/context</code> to see what documentation I'm answering from in this topic.\n` +
             `• Use <code>/recap [N]</code> to summarize the last N messages here (default 20).\n` +
             `• Use <code>/whoami</code> to show this chat's ids (useful for setup/diagnostics).\n` +
-            `• Reply to a message with <code>/push topic</code> or <code>/push group</code> to save it as lasting context (group admins only).\n` +
-            `• Mention me <code>@${botUsername} &lt;question&gt;</code> inside a topic to ask a question.\n` +
-            `• Use <code>/help</code> to see this message.`;
+            `• Use <code>/push topic</code> or <code>/push group</code> as a <i>reply</i> to a message to save that message as context for the topic or group (group admins only).\n` +
+            `• Mention me <code>@${botUsername} &lt;question&gt;</code> inside a topic to ask a question.`;
 
           await sendMessage(bot.telegram_bot_token, message.chat.id, helpText, {
             threadId,
