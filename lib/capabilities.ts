@@ -210,7 +210,7 @@ export async function logModelCall(input: {
   groupId: string | null;
   threadId: bigint | number | string | null;
   botId?: string | null;
-  callType: 'answer' | 'recap' | 'push_naming';
+  callType: 'answer' | 'recap' | 'push_naming' | 'document_qa';
   result: CallModelResult;
   providerName: string;
   isolationScopeId: string;
@@ -447,7 +447,7 @@ ${formatRulesFor(provider.outputFormat)}`;
     groupId: input.groupId,
     threadId: input.threadId,
     botId: input.botId,
-    callType: 'answer',
+    callType: 'document_qa',
     result,
     providerName: provider.name,
     isolationScopeId,
