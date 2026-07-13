@@ -551,9 +551,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         (async () => {
           const helpText = `<b>Telegram Bot Platform Help</b>\n\n` +
             `• Use <code>/context</code> to see what documentation I'm answering from in this topic.\n` +
+            `• Use <code>/push topic</code> or <code>/push group</code> as a <i>reply</i> to a message to save that message as context for the topic or group (group admins only).\n` +
             `• Use <code>/recap [N]</code> to summarize the last N messages here (default 20).\n` +
             `• Use <code>/whoami</code> to show this chat's ids (useful for setup/diagnostics).\n` +
-            `• Use <code>/push topic</code> or <code>/push group</code> as a <i>reply</i> to a message to save that message as context for the topic or group (group admins only).\n` +
             `• Mention me <code>@${botUsername} &lt;question&gt;</code> inside a topic to ask a question.`;
 
           await sendMessage(bot.telegram_bot_token, message.chat.id, helpText, {
