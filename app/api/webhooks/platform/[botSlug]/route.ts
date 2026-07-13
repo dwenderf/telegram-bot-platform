@@ -30,12 +30,19 @@ import {
   startTypingKeepalive,
   splitFormattedMessage,
   type TelegramMessageEntity,
+  runWithStatus,
 } from '@/lib/telegram';
 import { getModelIdentifier, ANTHROPIC_DOCUMENT_MODEL } from '@/lib/config';
 import { DocumentReadError } from '@/lib/model';
 
 const DEFAULT_RECAP = 20;
 const MAX_RECAP = 100;
+
+// Status copy (David-adjustable)
+const STATUS_QUESTION = '✍️ Pulling together the context and writing your response…';
+const STATUS_RECAP = '✍️ Reading back through the recent messages and putting your recap together…';
+const STATUS_DOC_DOWNLOAD = '📄 Downloading your document — one moment…';
+const STATUS_DOC_READING = '✍️ Got it — reading through the document and writing your response…';
 
 interface RouteParams {
   params: Promise<{
@@ -640,48 +647,50 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
       try {
         await setMessageReaction(bot.telegram_bot_token, message.chat.id, message.message_id, '👀');
-        await sendChatAction(bot.telegram_bot_token, message.chat.id, 'typing', threadId);
       } catch (err) {
-        console.error('Reaction/Action error:', err);
+        console.error('Reaction error:', err);
       }
 
       waitUntil(
         (async () => {
           try {
-            const { text, entities } = await recapConversation({
-              entityId: entity.id,
-              groupId: group.id,
+            const result = await runWithStatus({
+              token: bot.telegram_bot_token,
+              chatId: message.chat.id,
               threadId,
-              limit: requested,
-              botId,
-              note: note || null,
-            });
-
-            await sendFormattedMessage(
-              bot.telegram_bot_token,
-              message.chat.id,
-              { text, entities },
-              { threadId, replyToMessageId: message.message_id }
-            );
-
-            try {
-              await logBotResponse({
+              replyToMessageId: message.message_id,
+              initialStatus: STATUS_RECAP,
+              work: async () => recapConversation({
                 entityId: entity.id,
                 groupId: group.id,
-                telegramChatId: message.chat.id,
-                telegramThreadId: threadId,
-                botUsername: bot.telegram_username,
-                messageText: text,
-                summary: null,
-                generationMetadata: {
-                  model: bot.model || getModelIdentifier(),
-                  thread_id: threadId,
-                  kind: 'recap',
-                  recap_limit: requested,
-                },
-              });
-            } catch (err) {
-              console.error('Failed to log recap response:', err);
+                threadId,
+                limit: requested,
+                botId,
+                note: note || null,
+              }),
+              mapError: () => '⚠️ Sorry, couldn\'t build a recap right now.',
+            });
+
+            if (result) {
+              try {
+                await logBotResponse({
+                  entityId: entity.id,
+                  groupId: group.id,
+                  telegramChatId: message.chat.id,
+                  telegramThreadId: threadId,
+                  botUsername: bot.telegram_username,
+                  messageText: result.text,
+                  summary: null,
+                  generationMetadata: {
+                    model: bot.model || getModelIdentifier(),
+                    thread_id: threadId,
+                    kind: 'recap',
+                    recap_limit: requested,
+                  },
+                });
+              } catch (err) {
+                console.error('Failed to log recap response:', err);
+              }
             }
           } catch (err) {
             console.error('Error handling /recap:', err);
@@ -705,9 +714,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     if (isBotMention) {
       try {
         await setMessageReaction(bot.telegram_bot_token, message.chat.id, message.message_id, '👀');
-        await sendChatAction(bot.telegram_bot_token, message.chat.id, 'typing', threadId);
       } catch (err) {
-        console.error('Reaction/Action error:', err);
+        console.error('Reaction error:', err);
       }
 
       waitUntil(
@@ -741,94 +749,40 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                 return;
               }
 
-              let statusId: number | null = null;
-              let stopKeepalive: (() => void) | null = null;
-
-              // Helpers for safe edit/delete
-              const safeEdit = async (text: string, entities?: TelegramMessageEntity[]) => {
-                if (!statusId) return;
-                try {
-                  await editMessageText(
-                    bot.telegram_bot_token,
-                    message.chat.id,
-                    statusId,
-                    text,
-                    { entities }
-                  );
-                } catch (editErr) {
-                  console.error('Failed to edit status message:', editErr);
-                }
-              };
-
-              const safeDelete = async () => {
-                if (!statusId) return;
-                try {
-                  await deleteMessage(bot.telegram_bot_token, message.chat.id, statusId);
-                } catch (deleteErr) {
-                  console.error('Failed to delete status message:', deleteErr);
-                }
-              };
-
-              try {
-                // Send status, best-effort
-                try {
-                  const statusMsg = await sendMessage(
-                    bot.telegram_bot_token,
-                    message.chat.id,
-                    '📄 Downloading your document. One moment…',
-                    { threadId, replyToMessageId: message.message_id }
-                  );
-                  statusId = statusMsg?.result?.message_id ?? null;
-                } catch (statusErr) {
-                  console.error('Failed to send downloading status:', statusErr);
-                }
-
-                // Download
-                const fileData = await downloadTelegramFile(bot.telegram_bot_token, targetDoc.file_id);
-
-                // Edit status to reading
-                await safeEdit('✅ Download complete. Reading it now and formulating a response…');
-
-                // Start keep-alive
-                stopKeepalive = startTypingKeepalive(bot.telegram_bot_token, message.chat.id, threadId);
-
-                // Model read
-                const docResult = await answerAboutDocument({
-                  entityId: entity.id,
-                  groupId: group.id,
-                  threadId,
-                  question,
-                  document: {
-                    data: fileData.data,
-                    mediaType: 'application/pdf',
-                  },
-                  botId,
-                });
-
-                // Early stop keep-alive
-                if (stopKeepalive) {
-                  stopKeepalive();
-                  stopKeepalive = null;
-                }
-
-                // Terminal success
-                const chunks = splitFormattedMessage(docResult.text, docResult.entities);
-
-                if (chunks.length === 1 && statusId) {
-                  await safeEdit(docResult.text, docResult.entities);
-                } else {
-                  if (statusId) {
-                    await safeDelete();
+              const result = await runWithStatus({
+                token: bot.telegram_bot_token,
+                chatId: message.chat.id,
+                threadId,
+                replyToMessageId: message.message_id,
+                initialStatus: STATUS_DOC_DOWNLOAD,
+                work: async (updateStatus) => {
+                  const fileData = await downloadTelegramFile(bot.telegram_bot_token, targetDoc.file_id);
+                  await updateStatus(STATUS_DOC_READING);
+                  return answerAboutDocument({
+                    entityId: entity.id,
+                    groupId: group.id,
+                    threadId,
+                    question,
+                    document: {
+                      data: fileData.data,
+                      mediaType: 'application/pdf',
+                    },
+                    botId,
+                  });
+                },
+                mapError: (err) => {
+                  if (err instanceof DocumentReadError) {
+                    if (err.reason === 'too_many_pages') {
+                      return 'That PDF has too many pages for me to read — the limit is 100 pages.';
+                    } else if (err.reason === 'unreadable') {
+                      return 'I was unable to read that PDF. Please ensure it is not password-protected or corrupt.';
+                    }
                   }
-                  await sendFormattedMessage(
-                    bot.telegram_bot_token,
-                    message.chat.id,
-                    { text: docResult.text, entities: docResult.entities },
-                    { threadId, replyToMessageId: message.message_id }
-                  );
-                }
+                  return '⚠️ Sorry, something went wrong while processing your request.';
+                },
+              });
 
-                // Log response
+              if (result) {
                 try {
                   await logBotResponse({
                     entityId: entity.id,
@@ -836,7 +790,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                     telegramChatId: message.chat.id,
                     telegramThreadId: threadId,
                     botUsername: bot.telegram_username,
-                    messageText: docResult.text,
+                    messageText: result.text,
                     summary: null,
                     generationMetadata: {
                       model: ANTHROPIC_DOCUMENT_MODEL,
@@ -847,79 +801,45 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                 } catch (logErr) {
                   console.error('Failed to log bot response for document QA:', logErr);
                 }
-
-              } catch (err: any) {
-                if (stopKeepalive) {
-                  stopKeepalive();
-                  stopKeepalive = null;
-                }
-
-                console.error('Error in document QA pipeline:', err);
-
-                // Terminal error mapping
-                let errorText = '⚠️ Sorry, something went wrong while processing your request.';
-                if (err instanceof DocumentReadError) {
-                  if (err.reason === 'too_many_pages') {
-                    errorText = 'That PDF has too many pages for me to read — the limit is 100 pages.';
-                  } else if (err.reason === 'unreadable') {
-                    errorText = 'I was unable to read that PDF. Please ensure it is not password-protected or corrupt.';
-                  }
-                }
-
-                if (statusId) {
-                  await safeEdit(errorText);
-                } else {
-                  try {
-                    await sendMessage(
-                      bot.telegram_bot_token,
-                      message.chat.id,
-                      errorText,
-                      { threadId, replyToMessageId: message.message_id, parseMode: 'HTML' }
-                    );
-                  } catch (sendErr) {
-                    console.error('Failed fallback:', sendErr);
-                  }
-                }
-              } finally {
-                if (stopKeepalive) {
-                  stopKeepalive();
-                }
               }
             } else {
               // Normal answer flow
-              const { text, entities } = await answerQuestion({
-                entityId: entity.id,
-                groupId: group.id,
-                threadId: threadId,
-                question: question,
-                model: bot.model,
-                persona: bot.persona,
-                botId,
-              });
-
-              await sendFormattedMessage(
-                bot.telegram_bot_token,
-                message.chat.id,
-                { text, entities },
-                { threadId, replyToMessageId: message.message_id }
-              );
-
-              try {
-                await logBotResponse({
+              const result = await runWithStatus({
+                token: bot.telegram_bot_token,
+                chatId: message.chat.id,
+                threadId,
+                replyToMessageId: message.message_id,
+                initialStatus: STATUS_QUESTION,
+                work: async () => answerQuestion({
                   entityId: entity.id,
                   groupId: group.id,
-                  telegramChatId: message.chat.id,
-                  telegramThreadId: threadId,
-                  botUsername: bot.telegram_username,
-                  messageText: text,
-                  summary: null,
-                  generationMetadata: {
-                    model: bot.model || getModelIdentifier(),
-                    thread_id: threadId,
-                  },
-                });
-              } catch (err) {
-                console.error('Failed to log bot response:', err);
+                  threadId: threadId,
+                  question: question,
+                  model: bot.model,
+                  persona: bot.persona,
+                  botId,
+                }),
+                mapError: () => '⚠️ Sorry, something went wrong while processing your request.',
+              });
+
+              if (result) {
+                try {
+                  await logBotResponse({
+                    entityId: entity.id,
+                    groupId: group.id,
+                    telegramChatId: message.chat.id,
+                    telegramThreadId: threadId,
+                    botUsername: bot.telegram_username,
+                    messageText: result.text,
+                    summary: null,
+                    generationMetadata: {
+                      model: bot.model || getModelIdentifier(),
+                      thread_id: threadId,
+                    },
+                  });
+                } catch (err) {
+                  console.error('Failed to log bot response:', err);
+                }
               }
             }
           } catch (err: any) {

@@ -335,7 +335,7 @@ async function main() {
     assert(downloadStatus, 'Should send downloading status');
 
     // Reading status edited
-    const readingStatus = editCalls.find((c) => c.body.message_id === 8888 && c.body.text.includes('Reading it now'));
+    const readingStatus = editCalls.find((c) => c.body.message_id === 8888 && c.body.text.includes('reading through the document'));
     assert(readingStatus, 'Should edit to reading status');
 
     // Answer edited with entities

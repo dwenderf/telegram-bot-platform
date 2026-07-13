@@ -459,7 +459,12 @@ export function startTypingKeepalive(
   };
 
   fire();
-  const interval = setInterval(fire, intervalMs);
+  const interval = setInterval(
+    fire,
+    process.env.TEST_KEEPALIVE_INTERVAL
+      ? parseInt(process.env.TEST_KEEPALIVE_INTERVAL, 10)
+      : intervalMs
+  );
 
   let stopped = false;
   return () => {
@@ -467,4 +472,114 @@ export function startTypingKeepalive(
     stopped = true;
     clearInterval(interval);
   };
+}
+
+/**
+ * Unifies the "working on it" status message and keep-alive indicator across model calls.
+ */
+export async function runWithStatus(opts: {
+  token: string;
+  chatId: bigint | number;
+  threadId?: bigint | number | null;
+  replyToMessageId?: number;
+  initialStatus: string;
+  work: (updateStatus: (text: string) => Promise<void>) => Promise<{ text: string; entities: TelegramMessageEntity[] }>;
+  mapError: (err: unknown) => string;
+}): Promise<{ text: string; entities: TelegramMessageEntity[] } | null> {
+  const { token, chatId, threadId, replyToMessageId, initialStatus, work, mapError } = opts;
+  let statusId: number | null = null;
+  let stopKeepalive: (() => void) | null = null;
+
+  const safeEdit = async (text: string, entities?: TelegramMessageEntity[]) => {
+    if (!statusId) return;
+    try {
+      await editMessageText(token, chatId.toString(), statusId, text, { entities });
+    } catch (editErr) {
+      console.error('Failed to edit status message in runWithStatus:', editErr);
+    }
+  };
+
+  const safeDelete = async () => {
+    if (!statusId) return;
+    try {
+      await deleteMessage(token, chatId.toString(), statusId);
+    } catch (deleteErr) {
+      console.error('Failed to delete status message in runWithStatus:', deleteErr);
+    }
+  };
+
+  try {
+    // 1. Send initial status, best-effort
+    try {
+      const statusMsg = await sendMessage(token, chatId, initialStatus, {
+        threadId: threadId ?? undefined,
+        replyToMessageId,
+      });
+      statusId = statusMsg?.result?.message_id ?? null;
+    } catch (statusErr) {
+      console.error('Failed to send status message in runWithStatus:', statusErr);
+    }
+
+    // 2. Start keep-alive up front
+    stopKeepalive = startTypingKeepalive(token, chatId.toString(), threadId);
+
+    // 3. Execute work
+    const updateStatus = async (text: string) => {
+      await safeEdit(text);
+    };
+
+    const result = await work(updateStatus);
+
+    // 4. On success: stop keep-alive early
+    if (stopKeepalive) {
+      stopKeepalive();
+      stopKeepalive = null;
+    }
+
+    // Terminal success delivery
+    const chunks = splitFormattedMessage(result.text, result.entities);
+    if (chunks.length === 1 && statusId) {
+      await safeEdit(result.text, result.entities);
+    } else {
+      if (statusId) {
+        await safeDelete();
+      }
+      await sendFormattedMessage(token, chatId, result, {
+        threadId: threadId ?? undefined,
+        replyToMessageId,
+      });
+    }
+
+    return result;
+  } catch (err) {
+    // 5. On throw: stop keep-alive inline
+    if (stopKeepalive) {
+      stopKeepalive();
+      stopKeepalive = null;
+    }
+
+    console.error('Error executing work in runWithStatus:', err);
+    const errorText = mapError(err);
+
+    if (statusId) {
+      await safeEdit(errorText);
+    } else {
+      try {
+        await sendMessage(token, chatId, errorText, {
+          threadId: threadId ?? undefined,
+          replyToMessageId,
+          parseMode: 'HTML',
+        });
+      } catch (sendErr) {
+        console.error('Failed fallback send in runWithStatus:', sendErr);
+      }
+    }
+
+    return null;
+  } finally {
+    // 6. Finally block safety net
+    if (stopKeepalive) {
+      stopKeepalive();
+    }
+  }
 }
