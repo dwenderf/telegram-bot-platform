@@ -347,3 +347,18 @@ Set up an entity with docs + a group + a thread, exercising the new shape end-to
 - **RLS on `threads`** mirrors `groups`/`message_log` (force-RLS + `bot_service` policies); no new
   SECURITY DEFINER functions.
 - After this lands, flag `SPEC-phase-4-group-scoped-context.md` for its §7 revision.
+
+---
+
+## Addendum A (2026-07-13): Migration 2 formalized into tracked history
+
+Migration 2 (§6) was run manually shortly after this spec shipped, but only as
+`supabase/manual/manifest_normalization_drop.sql` — never captured as a dated file under
+`supabase/migrations/`, so the tracked migration history didn't reflect the live schema. It has
+now been moved (content unchanged) to `supabase/migrations/20260713000000_manifest_normalization_drop.sql`
+and should be re-applied via `npx supabase db push` so the CLI's migration ledger records it as
+applied. All drops in that file use `if exists` guards, so re-running it against the
+already-migrated schema is a safe no-op — this is a documentation fix, not a schema change.
+
+`doc_cache` and `manifest_entries` are therefore already in their fully normalized end state
+(§1/§3) as of this addendum: no `doc_path`, no `git_sha`, no `manifest_entries.telegram_thread_id`.
