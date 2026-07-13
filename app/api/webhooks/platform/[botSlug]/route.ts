@@ -14,7 +14,9 @@ import {
   updateLoggedMessage,
   registerThread,
   answerAboutDocument,
+  pushContext,
 } from '@/lib/capabilities';
+import { htmlToFormattable } from '@gramio/format/html';
 import {
   setMessageReaction,
   sendChatAction,
@@ -231,6 +233,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const isWhoamiCommand = rawText ? rawText.startsWith('/whoami') : false;
     const isAuthCommand = rawText ? rawText.startsWith('/auth') : false;
     const isRecapCommand = rawText ? rawText.startsWith('/recap') : false;
+    const isPushCommand = rawText ? rawText.startsWith('/push') : false;
     const isMention = botUsername ? effectiveText.includes(`@${botUsername}`) : false;
 
     let isCommand = false;
@@ -246,6 +249,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     } else if (isAuthCommand) {
       isCommand = true;
     } else if (isRecapCommand) {
+      isCommand = true;
+    } else if (isPushCommand) {
       isCommand = true;
     } else if (isMention) {
       isBotMention = true;
@@ -548,6 +553,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             `• Use <code>/context</code> to see what documentation I'm answering from in this topic.\n` +
             `• Use <code>/recap [N]</code> to summarize the last N messages here (default 20).\n` +
             `• Use <code>/whoami</code> to show this chat's ids (useful for setup/diagnostics).\n` +
+            `• Reply to a message with <code>/push topic</code> or <code>/push group</code> to save it as lasting context (group admins only).\n` +
             `• Mention me <code>@${botUsername} &lt;question&gt;</code> inside a topic to ask a question.\n` +
             `• Use <code>/help</code> to see this message.`;
 
@@ -708,6 +714,152 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         })()
       );
       return NextResponse.json({ ok: true, msg: 'Recap processing' });
+    }
+
+    // 13b. Respond to /push
+    if (isPushCommand) {
+      try {
+        await setMessageReaction(bot.telegram_bot_token, message.chat.id, message.message_id, '👀');
+      } catch (err) {
+        console.error('Reaction error in /push:', err);
+      }
+
+      const pushArg = text.replace(/^\/push(?:@[a-zA-Z0-9_]+)?\s*/i, '').trim();
+      const normalized = pushArg.toLowerCase();
+      let scope: 'topic' | 'group' | null = null;
+      if (normalized === 'topic' || normalized === 't') scope = 'topic';
+      else if (normalized === 'group' || normalized === 'g') scope = 'group';
+
+      const usageMessage = 'Usage: reply to a message with <code>/push topic</code> or <code>/push group</code> to save it as lasting context. (Group admins only.)';
+
+      if (!scope) {
+        try {
+          await sendMessage(bot.telegram_bot_token, message.chat.id, usageMessage, {
+            threadId,
+            replyToMessageId: message.message_id,
+            parseMode: 'HTML',
+          });
+        } catch (sendErr) {
+          console.error('Failed to send usage message:', sendErr);
+        }
+        return NextResponse.json({ ok: true, msg: 'Invalid push scope' });
+      }
+
+      const replyTarget = message.reply_to_message;
+      if (!replyTarget) {
+        try {
+          await sendMessage(bot.telegram_bot_token, message.chat.id, 'Reply to a message with <code>/push topic</code> or <code>/push group</code> to save its text as lasting context.', {
+            threadId,
+            replyToMessageId: message.message_id,
+            parseMode: 'HTML',
+          });
+        } catch (sendErr) {
+          console.error('Failed to send missing-reply prompt:', sendErr);
+        }
+        return NextResponse.json({ ok: true, msg: 'Missing reply target' });
+      }
+
+      const rawTargetText = replyTarget.text?.trim() ?? null;
+      if (replyTarget.document && !rawTargetText) {
+        try {
+          await sendMessage(bot.telegram_bot_token, message.chat.id, "I can't push a document directly. Mention me on it first to get a text summary, then reply to that summary with /push.", {
+            threadId,
+            replyToMessageId: message.message_id,
+          });
+        } catch (sendErr) {
+          console.error('Failed to send direct-doc prompt:', sendErr);
+        }
+        return NextResponse.json({ ok: true, msg: 'Direct document push rejected' });
+      }
+
+      if (!rawTargetText) {
+        try {
+          await sendMessage(bot.telegram_bot_token, message.chat.id, 'I can only push text messages. Reply to a text message (or one of my text answers) with /push.', {
+            threadId,
+            replyToMessageId: message.message_id,
+          });
+        } catch (sendErr) {
+          console.error('Failed to send text-only prompt:', sendErr);
+        }
+        return NextResponse.json({ ok: true, msg: 'Non-text push rejected' });
+      }
+
+      let isAdmin = false;
+      const callerId = message.from?.id ?? null;
+      if (callerId !== null) {
+        try {
+          const chatMember = await getChatMember(bot.telegram_bot_token, message.chat.id, callerId);
+          const status = chatMember?.result?.status;
+          if (status === 'administrator' || status === 'creator') {
+            isAdmin = true;
+          }
+        } catch (err) {
+          console.error('Failed to check admin status for push:', err);
+        }
+      }
+
+      if (!isAdmin) {
+        try {
+          await sendMessage(bot.telegram_bot_token, message.chat.id, 'Only a group admin can push context here.', {
+            threadId,
+            replyToMessageId: message.message_id,
+          });
+        } catch (sendErr) {
+          console.error('Failed to send admin-only warning:', sendErr);
+        }
+        return NextResponse.json({ ok: true, msg: 'Unauthorized push' });
+      }
+
+      waitUntil(
+        (async () => {
+          try {
+            await runWithStatus({
+              token: bot.telegram_bot_token,
+              chatId: message.chat.id,
+              threadId,
+              replyToMessageId: message.message_id,
+              initialStatus: '💭 Saving this to context…',
+              work: async () => {
+                if (scope === 'topic' && threadId === null) {
+                  throw new Error('no_topic_here');
+                }
+
+                const pushedResult = await pushContext({
+                  entityId: entity.id,
+                  groupId: group.id,
+                  scope: scope!,
+                  threadTelegramId: threadId,
+                  content: rawTargetText,
+                  originChatId: message.chat.id.toString(),
+                  originMessageId: replyTarget.message_id.toString(),
+                  pushedByTgUserId: callerId!,
+                  pushedByUsername: message.from?.username ?? null,
+                  botId,
+                  model: bot.model || undefined,
+                });
+
+                const scopeLabel = scope === 'topic' ? 'this topic' : 'this group';
+                const prefix = pushedResult.isUpdate ? '🔄 <b>Updated in ' : '✅ <b>Saved to ';
+                const escapedSnippet = sanitizeForTelegramHtml(
+                  rawTargetText.length > 100 ? rawTargetText.slice(0, 100) + '…' : rawTargetText
+                );
+
+                const htmlString = `${prefix}${scopeLabel}</b>\n\n<b>${pushedResult.name}</b>\n${escapedSnippet}`;
+                return htmlToFormattable(htmlString);
+              },
+              mapError: (err: any) => {
+                if (err?.message === 'no_topic_here') {
+                  return "There's no topic here to push to — try /push group instead, or push from inside a specific topic.";
+                }
+                return '⚠️ Sorry, something went wrong while processing your request.';
+              },
+            });
+          } catch (err) {
+            console.error('Error handling async push workflow:', err);
+          }
+        })()
+      );
+      return NextResponse.json({ ok: true, msg: 'Push processing' });
     }
 
     // 14. Respond to Mentions (answer Question) (S4)

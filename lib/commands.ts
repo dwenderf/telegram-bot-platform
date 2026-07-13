@@ -14,5 +14,6 @@ export const BOT_COMMANDS: BotCommand[] = [
   { command: 'recap',   description: 'Summarize the last messages in this topic' },
   { command: 'whoami',  description: "Show this chat's ids (setup/diagnostics)" },
   { command: 'auth',    description: 'Link this Telegram group to a workspace' },
+  { command: 'push',    description: 'Save this reply as lasting context (admins)' },
   { command: 'help',    description: 'Show what the bot can do' },
 ];

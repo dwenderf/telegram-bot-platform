@@ -1,5 +1,5 @@
 import postgres from 'postgres';
-import { sql, withTenantContext } from './supabase';
+import { sql, withTenantContext, withBotContext } from './supabase';
 import { resolveProvider, CallModelResult, DocumentReadError } from './model';
 import { getModelIdentifier, getContextMessageHistoryLimit, ANTHROPIC_DOCUMENT_MODEL } from './config';
 import { resolveIsolationScopeId, ISOLATION_SCOPE_TYPE } from './isolation';
@@ -210,7 +210,7 @@ export async function logModelCall(input: {
   groupId: string | null;
   threadId: bigint | number | string | null;
   botId?: string | null;
-  callType: 'answer' | 'recap';
+  callType: 'answer' | 'recap' | 'push_naming';
   result: CallModelResult;
   providerName: string;
   isolationScopeId: string;
@@ -848,4 +848,222 @@ export async function resolveEntityIdByChat(chatId: bigint | number | string): P
     select public.resolve_entity_id_by_chat(${chatId.toString()})
   `;
   return rows[0]?.resolve_entity_id_by_chat || null;
+}
+
+function yyyymmdd(d: Date): string {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}${mm}${dd}`;
+}
+
+function sanitizePushSlug(raw: string): string {
+  return raw
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 100);
+}
+
+/**
+ * Pushes saved context to a specific topic or group scope.
+ */
+export async function pushContext(input: {
+  entityId: string;
+  groupId: string;
+  scope: 'topic' | 'group';
+  threadTelegramId: bigint | null;
+  content: string;
+  originChatId: string;
+  originMessageId: string;
+  pushedByTgUserId: bigint | number | string;
+  pushedByUsername: string | null;
+  botId: string;
+  model?: string;
+}): Promise<{ name: string; isUpdate: boolean }> {
+  const {
+    entityId,
+    groupId,
+    scope,
+    threadTelegramId,
+    content,
+    originChatId,
+    originMessageId,
+    pushedByTgUserId,
+    pushedByUsername,
+    botId,
+  } = input;
+
+  let resolvedThreadId: string | null = null;
+  let matchedDocId: string | null = null;
+  let matchedDocName: string | null = null;
+  let existingNames: string[] = [];
+
+  // Transaction 1: Resolve scope, check origin identity, and fetch existing names
+  await withTenantContext(entityId, async (tx) => {
+    // 1. Resolve scope
+    if (scope === 'topic') {
+      if (threadTelegramId === null) {
+        throw new Error('no_topic_here');
+      }
+      const threads = await tx<{ id: string }[]>`
+        select id from public.threads
+        where group_id = ${groupId}::uuid and telegram_thread_id = ${threadTelegramId.toString()}::bigint
+      `;
+      if (threads.length === 0) {
+        throw new Error(`Thread row not found for telegram_thread_id ${threadTelegramId}`);
+      }
+      resolvedThreadId = threads[0].id;
+    }
+
+    // 2. Origin Check (select c.source directly to avoid a second round-trip)
+    const matches = await tx<{ doc_id: string; display_name: string; source: any }[]>`
+      select m.doc_id, c.display_name, c.source
+      from public.manifest_entries m
+      join public.doc_cache c on c.id = m.doc_id
+      where m.entity_id = ${entityId}::uuid
+        and m.group_id = ${groupId}::uuid
+        and m.thread_id is not distinct from ${resolvedThreadId}::uuid
+        and c.source_type = 'push'
+        and c.source->>'origin_chat_id' = ${originChatId}
+        and c.source->>'origin_message_id' = ${originMessageId}
+      limit 1
+    `;
+
+    if (matches.length > 0) {
+      matchedDocId = matches[0].doc_id;
+      matchedDocName = matches[0].display_name;
+
+      // Update in-place
+      const refreshedSource = {
+        pushed_via: 'telegram_push',
+        pushed_by_tg_user_id: pushedByTgUserId.toString(),
+        pushed_by_username: pushedByUsername,
+        origin_chat_id: originChatId,
+        origin_message_id: originMessageId,
+        scope,
+        first_pushed_at: matches[0].source?.first_pushed_at || new Date().toISOString(),
+      };
+
+      await tx`
+        update public.doc_cache
+        set content = ${content},
+            source = ${tx.json(refreshedSource)},
+            synced_at = now()
+        where id = ${matchedDocId}::uuid
+      `;
+    } else {
+      // 3. Fetch existing names in scope
+      const rows = await tx<{ display_name: string }[]>`
+        select c.display_name
+        from public.manifest_entries m
+        join public.doc_cache c on c.id = m.doc_id
+        where m.entity_id = ${entityId}::uuid
+          and m.group_id = ${groupId}::uuid
+          and m.thread_id is not distinct from ${resolvedThreadId}::uuid
+      `;
+      existingNames = rows.map((r) => r.display_name);
+    }
+  });
+
+  if (matchedDocId && matchedDocName) {
+    return { name: matchedDocName, isUpdate: true };
+  }
+
+  // 4. Name Generation (LLM call outside open transactions)
+  // Zero DB queries: caller already fetches the bot's model or we use config fallback
+  const model = input.model || getModelIdentifier();
+  const provider = resolveProvider(model);
+  const isolationScopeId = resolveIsolationScopeId(groupId);
+
+  const systemPrompt = `You generate short slug-style names for saved context documents. Output ONLY the slug — no explanation, no punctuation besides hyphens, no quotes.
+Rules:
+- 3 to 6 words
+- lowercase letters and numbers only, words separated by single hyphens (e.g. "vendor-contract-terms")
+- capture the core topic of the text
+- avoid these existing names in this scope if possible: ${existingNames.length ? existingNames.join(', ') : 'none'}`;
+
+  const callResult = await provider.callModel({
+    systemPrompt,
+    userMessage: content,
+    model,
+    cacheable: false,
+    isolationScopeId,
+  });
+
+  await logModelCall({
+    entityId,
+    groupId,
+    threadId: threadTelegramId,
+    botId,
+    callType: 'push_naming',
+    result: callResult,
+    providerName: provider.name,
+    isolationScopeId,
+  });
+
+  let candidateName = sanitizePushSlug(callResult.text);
+  if (!candidateName) {
+    candidateName = `push-${scope}-${yyyymmdd(new Date())}`;
+  }
+
+  let finalName = candidateName;
+
+  // Transaction 2: Deduplicate name inside a transaction, insert doc_cache and manifest_entries
+  // Avoid re-querying public.threads for resolvedThreadId (Transaction 1 already resolved and stored it)
+  await withTenantContext(entityId, async (tx) => {
+    const rows = await tx<{ display_name: string }[]>`
+      select c.display_name
+      from public.manifest_entries m
+      join public.doc_cache c on c.id = m.doc_id
+      where m.entity_id = ${entityId}::uuid
+        and m.group_id = ${groupId}::uuid
+        and m.thread_id is not distinct from ${resolvedThreadId}::uuid
+    `;
+    const freshNames = new Set(rows.map((r) => r.display_name.toLowerCase()));
+
+    let suffix = 2;
+    while (freshNames.has(finalName.toLowerCase())) {
+      finalName = `${candidateName}-${suffix}`;
+      suffix++;
+    }
+
+    const docSource = {
+      pushed_via: 'telegram_push',
+      pushed_by_tg_user_id: pushedByTgUserId.toString(),
+      pushed_by_username: pushedByUsername,
+      origin_chat_id: originChatId,
+      origin_message_id: originMessageId,
+      scope,
+      first_pushed_at: new Date().toISOString(),
+    };
+
+    const insertedDoc = await tx<{ id: string }[]>`
+      insert into public.doc_cache (entity_id, display_name, content, source_type, source)
+      values (
+        ${entityId}::uuid,
+        ${finalName},
+        ${content},
+        'push',
+        ${tx.json(docSource)}
+      )
+      returning id
+    `;
+    const newDocId = insertedDoc[0].id;
+
+    await tx`
+      insert into public.manifest_entries (entity_id, group_id, thread_id, doc_id)
+      values (
+        ${entityId}::uuid,
+        ${groupId}::uuid,
+        ${resolvedThreadId}::uuid,
+        ${newDocId}::uuid
+      )
+    `;
+  });
+
+  return { name: finalName, isUpdate: false };
 }
