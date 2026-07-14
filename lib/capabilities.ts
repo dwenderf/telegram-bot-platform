@@ -234,7 +234,8 @@ export async function logModelCall(input: {
       await tx`
         insert into public.model_calls (
           entity_id, group_id, thread_id, bot_id, call_type, model, provider,
-          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, metadata
+          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+          web_search_requests, metadata
         ) values (
           ${input.entityId}::uuid,
           ${input.groupId}::uuid,
@@ -247,6 +248,7 @@ export async function logModelCall(input: {
           ${input.result.usage.output_tokens ?? null},
           ${input.result.usage.cache_read_tokens ?? 0},
           ${input.result.usage.cache_creation_tokens ?? 0},
+          ${input.result.webSearchRequests ?? 0},
           ${tx.json({
             ...input.result.raw,
             isolationScopeId: input.isolationScopeId,
@@ -323,6 +325,13 @@ export function renderModelOutput(text: string, outputFormat: 'markdown' | 'html
   };
 }
 
+const WEB_SEARCH_GROUNDING = `WEB SEARCH GUIDANCE:
+- Prefer the team's context documents and recent conversation above. Answer from them when they cover the question.
+- Use web search when the question needs current, external, or fast-changing information the context documents do not cover (recent events, prices, releases, "what is <external thing>").
+- If a context document conflicts with clearly newer information from search, answer from the newer information and briefly note the discrepancy.
+- Weight primary and official sources; treat promotional, exchange-listing, or SEO "what is X" pages as lower-trust context, not authority.
+- Cite sources inline as markdown links when you draw on them.`;
+
 /**
  * Generate an answer. Internally builds the system prompt, calls the model provider, and returns answer.
  */
@@ -355,6 +364,8 @@ export async function answerQuestion(input: {
 
 ${formatRulesFor(provider.outputFormat)}
 
+${WEB_SEARCH_GROUNDING}
+
 PROJECT CONTEXT:
 ${contextDocs}`;
 
@@ -370,6 +381,7 @@ ${input.question}`;
     model,
     cacheable: true,
     isolationScopeId,
+    webSearch: { maxUses: 5 },
   });
 
   await logModelCall({

@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { ModelProvider, CallModelInput, CallModelResult } from '../model';
+import { ModelProvider, CallModelInput, CallModelResult, extractReplyText } from '../model';
 import { getModelMaxOutputTokens } from '../config';
+
 
 let anthropicInstance: Anthropic | null = null;
 function getAnthropicInstance(): Anthropic {
@@ -72,13 +73,8 @@ export class AnthropicProvider implements ModelProvider {
         }
       );
 
-      let replyText = '';
-      if (response.content && response.content.length > 0) {
-        const firstBlock = response.content[0];
-        if (firstBlock.type === 'text') {
-          replyText = firstBlock.text;
-        }
-      }
+      // Use the shared extractReplyText helper to safely extract the final answer.
+      const replyText = extractReplyText(response.content);
 
       return {
         text: replyText,

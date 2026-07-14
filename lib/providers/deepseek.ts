@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { ModelProvider, CallModelInput, CallModelResult, DocumentUnsupportedError } from '../model';
+import { ModelProvider, CallModelInput, CallModelResult, DocumentUnsupportedError, extractReplyText } from '../model';
 import { getModelMaxOutputTokens } from '../config';
+
 
 export class DeepSeekProvider implements ModelProvider {
   readonly name = 'deepseek';
@@ -40,32 +41,33 @@ export class DeepSeekProvider implements ModelProvider {
       // DeepSeek compat endpoint normalizes into Anthropic messages structure.
       // We hardcode thinking: disabled as reasoning tokens are billable output
       // and not required for QA/recap workloads.
-      const response = await this.anthropic.messages.create(
-        {
-          model: input.model,
-          max_tokens: getModelMaxOutputTokens(),
-          system: systemContent,
-          messages: [
-            {
-              role: 'user',
-              content: input.userMessage,
-            },
-          ],
-          metadata: { user_id: input.isolationScopeId },
-          // Cast to any since thinking API might not be present on older SDK types
-          thinking: { type: 'disabled' },
-        } as any
-      );
+      const createParams: any = {
+        model: input.model,
+        max_tokens: getModelMaxOutputTokens(),
+        system: systemContent,
+        messages: [
+          {
+            role: 'user',
+            content: input.userMessage,
+          },
+        ],
+        metadata: { user_id: input.isolationScopeId },
+        thinking: { type: 'disabled' },
+      };
 
-      // DeepSeek responses might include thinking content blocks if misconfigured
-      // or if reasoning is activated. Find the first text block rather than referencing [0].
-      let replyText = '';
-      if (response.content && response.content.length > 0) {
-        const textBlock = response.content.find((block) => block.type === 'text');
-        if (textBlock && textBlock.type === 'text') {
-          replyText = textBlock.text;
-        }
+      if (input.webSearch) {
+        createParams.tools = [
+          { type: 'web_search_20250305', name: 'web_search', max_uses: input.webSearch.maxUses },
+        ];
       }
+
+      const response = await this.anthropic.messages.create(createParams);
+
+      // DeepSeek responses might include thinking, tool use, and tool result blocks.
+      // Use the shared extractReplyText helper to safely extract the final answer.
+      const replyText = extractReplyText(response.content);
+
+      const webSearchRequests = (response.usage as any).server_tool_use?.web_search_requests ?? 0;
 
       return {
         text: replyText,
@@ -78,6 +80,7 @@ export class DeepSeekProvider implements ModelProvider {
         model: response.model,
         requestId: response.id,
         stopReason: response.stop_reason,
+        webSearchRequests,
       };
     } catch (error: any) {
       console.error('DeepSeek API call failed:', error);

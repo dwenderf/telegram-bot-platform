@@ -25,6 +25,7 @@ export interface CallModelInput {
   cacheable: boolean;
   isolationScopeId: string; // required; produced only by resolveIsolationScopeId()
   document?: { data: string; mediaType: string };
+  webSearch?: { maxUses: number }; // NEW, optional — attach web_search server tool
 }
 
 export interface CallModelResult {
@@ -38,6 +39,7 @@ export interface CallModelResult {
   model: string;
   requestId: string | null;
   stopReason: string | null;
+  webSearchRequests?: number; // NEW — surfaced from usage.server_tool_use.web_search_requests
   raw?: Record<string, any>;
 }
 
@@ -102,3 +104,27 @@ export function resolveProvider(modelName?: string | null): ModelProvider {
 
   return getAnthropicProvider();
 }
+
+/**
+ * Shared helper to extract final answer text from model content blocks,
+ * correctly skipping preambles or narration blocks preceding tool results.
+ */
+export function extractReplyText(content: any[]): string {
+  if (!Array.isArray(content) || content.length === 0) return '';
+  // Prefer text blocks AFTER the last server-tool result (web_search_tool_result / web_fetch_tool_result);
+  // if there is no tool result, use all text blocks. Concatenate + trim.
+  let startIdx = 0;
+  for (let i = content.length - 1; i >= 0; i--) {
+    const t = content[i]?.type;
+    if (t === 'web_search_tool_result' || t === 'web_fetch_tool_result') {
+      startIdx = i + 1;
+      break;
+    }
+  }
+  const slice = content.slice(startIdx);
+  const texts = (slice.some((b) => b.type === 'text') ? slice : content)
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text ?? '');
+  return texts.join('').trim();
+}
+
