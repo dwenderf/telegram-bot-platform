@@ -152,9 +152,10 @@ export async function buildContext(
     // 1. Fetch manifest entries and join with cached doc content (group-scoped)
     // Lockstep Invariant (Row Selection only): Must match getContextManifest query WHERE/joins exactly.
     // Ordering differs: getContextManifest sorts alphabetically for display, while buildContext sorts
-    // by layer + doc_id to guarantee byte-stable prompts for caching.
-    const docs = await tx<{ thread_id: string | null; group_id: string | null; display_name: string; content: string }[]>`
-      select m.thread_id, m.group_id, c.display_name, c.content
+    // by layer + created_at + doc_id so new documents append rather than insert, keeping the cache prefix stable.
+    const docs = await tx<{ thread_id: string | null; group_id: string | null; display_name: string; content: string; updated: string }[]>`
+      select m.thread_id, m.group_id, c.display_name, c.content,
+             to_char(c.synced_at at time zone 'utc', 'YYYY-MM-DD') as updated
       from manifest_entries m
       join doc_cache c on c.id = m.doc_id
       left join threads t on t.id = m.thread_id
@@ -167,15 +168,16 @@ export async function buildContext(
           when m.thread_id is null then 1                          -- group
           else 2                                                    -- topic
         end,
+        m.created_at,
         m.doc_id
     `;
 
-    // Format docs as structured XML tags using display_name (Item 1b)
+    // Format docs as structured XML tags using path, scope, and updated attributes
     const contextDocs = docs
-      .map(
-        (doc) =>
-          `<document path="${doc.display_name}">\n${doc.content}\n</document>`
-      )
+      .map((doc) => {
+        const scope = doc.thread_id !== null ? 'topic' : doc.group_id !== null ? 'group' : 'entity';
+        return `<document path="${doc.display_name}" scope="${scope}" updated="${doc.updated}">\n${doc.content}\n</document>`;
+      })
       .join('\n\n');
 
     // 2. Fetch the most recent configured messages in this thread
@@ -325,6 +327,13 @@ export function renderModelOutput(text: string, outputFormat: 'markdown' | 'html
   };
 }
 
+const CONTEXT_GROUNDING = `CONTEXT DOCUMENT GUIDANCE:
+- Each document is tagged with a scope (entity | group | topic) and the date its content was last updated.
+- Scope is specificity: entity documents are organization-wide, group documents apply to this group, topic documents apply to this topic only. When documents at different scopes both apply, the narrower scope is the more specific instruction for this conversation.
+- Within the same scope, when two documents conflict, prefer the one with the more recent updated date.
+- If a broader-scope document is clearly newer and states a change that contradicts a narrower one, do not silently pick a side — answer with the most likely intent and briefly note the conflict.
+- Do not infer recency from a document's position. Use the updated attribute.`;
+
 const WEB_SEARCH_GROUNDING = `WEB SEARCH GUIDANCE:
 - Prefer the team's context documents and recent conversation above. Answer from them when they cover the question.
 - Use web search when the question needs current, external, or fast-changing information the context documents do not cover (recent events, prices, releases, "what is <external thing>").
@@ -363,6 +372,8 @@ export async function answerQuestion(input: {
   const systemPrompt = `${basePersona}
 
 ${formatRulesFor(provider.outputFormat)}
+
+${CONTEXT_GROUNDING}
 
 ${WEB_SEARCH_GROUNDING}
 
@@ -766,7 +777,7 @@ export async function checkVaultSecretsHealth(
  * Resolves context document manifest for `/context` status and downloads.
  * Lockstep Invariant (Row Selection only): Must match buildContext query WHERE/joins exactly.
  * Ordering differs: getContextManifest sorts alphabetically for display, while buildContext sorts
- * by layer + doc_id to guarantee byte-stable prompts for caching.
+ * by layer + created_at + doc_id so new documents append rather than insert, keeping the cache prefix stable.
  */
 export async function getContextManifest(
   entityId: string,
