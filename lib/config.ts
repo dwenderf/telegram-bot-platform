@@ -40,3 +40,11 @@ export function getContextMessageHistoryLimit(): number {
 // Model for document reads (Anthropic-only capability). Not an operator preference —
 // hardcoded, not an env var. Update here on deprecation; flagged in the README.
 export const ANTHROPIC_DOCUMENT_MODEL = 'claude-sonnet-5';
+
+// Public URL of the hosted privacy policy page. Config, not a secret. Defaults to the
+// canonical URL so a notice link is never empty; override per environment if needed.
+export function getPrivacyPolicyUrl(): string {
+  const v = process.env.PRIVACY_POLICY_URL;
+  return v && v.trim() !== '' ? v.trim() : 'https://leguan.ai/privacy';
+}
+

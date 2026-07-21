@@ -362,6 +362,39 @@ curl "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands" \
 > `lib/commands.ts`). To bulk-sync all active platform bots after a command-list change in `lib/commands.ts`,
 > run the script instead (see A8c.3 above).
 
+## A8d. Privacy policy page + in-chat notice configuration
+
+The platform bot posts short in-chat **transparency notices** (once when it is added to a group, and when a member joins) that link to a public **privacy policy**. See `docs/specs/SPEC-privacy-notices.md`. Four one-time items make the link resolve and put the policy on the bot's profile. (The notice-sending code and the `/privacy` route ship with the app in A7; these steps configure them.)
+
+### A8d.1 — Publish the policy page
+The policy lives in-repo at `content/legal/privacy.md` and is served by the app at `/privacy` (built + deployed in A7). Before going live:
+- **Fill every `[BRACKETED]` placeholder** in `content/legal/privacy.md` (legal entity name + registered address, contact email, dates, children's age) and **have counsel review it** — it ships as a *draft* (a leading HTML comment flags this; that comment does not render).
+- Confirm it renders on the runtime domain immediately: `https://api.kenntnis.ai/privacy`.
+
+### A8d.2 — Point the canonical URL at it (apex `leguan.ai`)
+The one Vercel project serves every attached domain, so `/privacy` is already live on all of them. For the canonical public URL `https://leguan.ai/privacy`:
+1. Add the apex domain **`leguan.ai`** to the Vercel project (Domains) and add the DNS records Vercel specifies at your registrar.
+2. Confirm `https://leguan.ai/privacy` resolves.
+
+### A8d.3 — Set `PRIVACY_POLICY_URL` (optional — it defaults)
+`lib/config.ts` defaults this to `https://leguan.ai/privacy`, so you only set it to **override** (e.g. a staging URL). It is **config, not a secret** (no `NEXT_PUBLIC_` prefix; server-side only). If overriding, set it in Vercel's Production (and Preview, if different) env and redeploy.
+
+### A8d.4 — Set the bot's profile fields in BotFather
+`@BotFather` → `Edit @leguan_the_bot info`:
+- **Edit Privacy Policy** → `https://leguan.ai/privacy` (must match `PRIVACY_POLICY_URL`).
+- **Edit About** (≤120 chars — shows on the profile card group members see):
+  ```
+  AI assistant for group Q&A and chat recaps, grounded in your team's docs. Logs messages — see the Privacy Policy.
+  ```
+- **Edit Description** (≤512 chars — shows in an empty private chat before Start):
+  ```
+  Leguan adds an AI assistant to your Telegram group. Mention it with a question to get answers from your team's saved documents, use /recap to summarize recent messages, and /push to save a message as lasting context.
+
+  To power these features, Leguan logs group messages and may send them to AI model providers to generate answers — used only for these features. See the Privacy Policy below for how your data is handled and your choices.
+  ```
+
+> Only **About** and **Privacy Policy** surface on the profile card a group member sees by tapping the bot; **Description** only appears in an empty private chat before Start — so keep nothing load-bearing solely in Description.
+
 ## A9. Platform smoke test (curl — verified)
 
 These three curls confirm the app is deployed, routing, authenticating, and — critically — **reaching the database**, all *before* any tenant exists. Run them against the live domain; watch the **Vercel logs** alongside (Dashboard → project → Logs) for the definitive signal.

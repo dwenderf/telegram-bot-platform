@@ -36,6 +36,13 @@ import {
 } from '@/lib/telegram';
 import { getModelIdentifier, ANTHROPIC_DOCUMENT_MODEL } from '@/lib/config';
 import { DocumentReadError } from '@/lib/model';
+import {
+  shouldAnnounceFirstAdd,
+  buildJoinerMentions,
+  getAnnounceFirstAdd,
+  NOTICE_ON_JOIN,
+} from '@/lib/privacy';
+
 
 const DEFAULT_RECAP = 20;
 const MAX_RECAP = 100;
@@ -112,7 +119,22 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       console.error('Failed to archive raw Telegram event:', err);
     }
 
+    // 3c. First-add announcement (bot added to a group) — entity-agnostic, runs pre-/auth.
+    if (update.my_chat_member) {
+      if (shouldAnnounceFirstAdd(update.my_chat_member)) {
+        try {
+          await sendMessage(bot.telegram_bot_token, update.my_chat_member.chat.id, getAnnounceFirstAdd(), {
+            parseMode: 'HTML',
+          });
+        } catch (err) {
+          console.error('Failed to send first-add announcement:', err);
+        }
+      }
+      return NextResponse.json({ ok: true, msg: 'my_chat_member handled' });
+    }
+
     const message = update.message;
+
     const editedMessage = update.edited_message;
 
     // Handle edited messages (Item 2.1)
@@ -210,7 +232,47 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
     }
 
+    // Service message: new members joined
+    if (message && message.chat && Array.isArray(message.new_chat_members) && message.new_chat_members.length > 0) {
+      const { joiners, mentionsHtml } = buildJoinerMentions(message.new_chat_members);
+      if (joiners.length === 0) {
+        return NextResponse.json({ ok: true, msg: 'Only bot(s) joined — no notice' });
+      }
+
+      const entityId = await resolveEntityIdByChat(message.chat.id);
+      if (!entityId) {
+        // Group not bound yet → bot isn't logging here → nothing to disclose.
+        return NextResponse.json({ ok: true, msg: 'Unbound group — no join notice' });
+      }
+
+      // Idempotency: dedup on update_id (same mechanism as step 4b), scoped to the entity.
+      const updateId = update.update_id;
+      if (updateId) {
+        try {
+          await withTenantContext(entityId, async (tx) => {
+            await tx`
+              insert into processed_updates (update_id, entity_id)
+              values (${updateId}, ${entityId})
+            `;
+          });
+        } catch (err) {
+          console.info(`Duplicate join update ignored (Idempotency): ${updateId}`);
+          return NextResponse.json({ ok: true, msg: 'Duplicate join update ignored' });
+        }
+      }
+
+      try {
+        await sendMessage(bot.telegram_bot_token, message.chat.id, NOTICE_ON_JOIN(mentionsHtml), {
+          parseMode: 'HTML',
+        });
+      } catch (err) {
+        console.error('Failed to send on-join notice:', err);
+      }
+      return NextResponse.json({ ok: true, msg: 'Join notice sent' });
+    }
+
     if (!message || !message.chat) {
+
       return NextResponse.json({ ok: true });
     }
 

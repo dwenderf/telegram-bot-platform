@@ -1,7 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  outputFileTracingIncludes: {
+    '/privacy': ['./content/legal/privacy.md'],
+  },
 };
+
 
 export default nextConfig;
