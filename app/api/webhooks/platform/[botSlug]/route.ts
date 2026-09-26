@@ -42,6 +42,7 @@ import {
   getAnnounceFirstAdd,
   NOTICE_ON_JOIN,
 } from '@/lib/privacy';
+import { rejectUnlessValidTelegramSecret } from '@/lib/webhookAuth';
 
 
 const DEFAULT_RECAP = 20;
@@ -88,10 +89,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     }
 
     // 3. Webhook-secret gate (runs before entity resolution) (S1)
-    const incomingSecret = req.headers.get('x-telegram-bot-api-secret-token');
-    if (incomingSecret !== bot.telegram_webhook_secret) {
+    // Fails closed: a missing stored secret never matches, even a missing header.
+    const unauthorized = rejectUnlessValidTelegramSecret(req, bot.telegram_webhook_secret);
+    if (unauthorized) {
       console.warn(`Unauthorized webhook attempt on bot: ${botSlug}`);
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return unauthorized;
     }
 
     const update = await req.json();
