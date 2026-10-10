@@ -399,20 +399,20 @@ The one Vercel project serves every attached domain, so `/privacy` is already li
 
 These three curls confirm the app is deployed, routing, authenticating, and — critically — **reaching the database**, all *before* any tenant exists. Run them against the live domain; watch the **Vercel logs** alongside (Dashboard → project → Logs) for the definitive signal.
 
-**1. Endpoint alive (no DB):**
+**1. Endpoint alive (GET not allowed):**
 ```bash
-curl -i https://api.kenntnis.ai/api/webhooks/github/sync
+curl -i https://api.kenntnis.ai/api/webhooks/platform/leguan
 ```
-Expect **405** (GET on a POST route) — confirms the route exists and the app is serving (not a 404).
+Expect **405** — the route exports only `POST`, so a GET confirms the route exists and the app is serving (not a 404). Writes nothing.
 
-**2. GitHub auth works (no DB):**
+**2. Webhook-secret gate works (reaches the DB):**
 ```bash
-curl -i -X POST https://api.kenntnis.ai/api/webhooks/github/sync \
-  -H "Content-Type: application/json" -d '{"test": true}'
+curl -i -X POST https://api.kenntnis.ai/api/webhooks/platform/leguan \
+  -H "Content-Type: application/json" -d '{"update_id": 1}'
 ```
-Expect **401** (invalid/missing signature). Log: `Unauthorized GitHub sync attempt (invalid signature)`. A *clean* 401 (not a 500) confirms the handler runs and its HMAC check works.
+Expect **401** with an empty body (missing/invalid `x-telegram-bot-api-secret-token`). Log: `Unauthorized webhook attempt on bot: leguan`. The bot is resolved from the DB first, so a clean 401 (not a 500) confirms both the DB lookup and the secret check. The request is rejected *before* the raw-event archive insert, so no `telegram_events` row is written.
 
-**3. Database connection works (this one hits Postgres):**
+**3. Unknown bot slug (hits Postgres):**
 ```bash
 curl -i -X POST https://api.kenntnis.ai/api/webhooks/platform/nonexistent \
   -H "Content-Type: application/json" \
@@ -695,7 +695,7 @@ select vault.update_secret(
 
 **Webhook URLs:**
 - Telegram (single **platform** webhook): `https://api.kenntnis.ai/api/webhooks/platform/{bot-slug}` — e.g. `.../platform/leguan`. One webhook for the whole platform; routes on the **bot** slug.
-- GitHub sync (optional, not used in v1): `https://api.kenntnis.ai/api/webhooks/github/sync` — resolves by repo; only relevant if the GitHub sync-source is enabled later.
+- GitHub sync: no webhook route exists in the current code (`app/api/webhooks/` contains only `platform/`); the former `/api/webhooks/github/sync` endpoint is gone.
 
 **Environment variables (platform-wide):** `DATABASE_URL` (bot_service, **pooler** string), `ANTHROPIC_API_KEY`. `GITHUB_WEBHOOK_SECRET` is only needed if the optional GitHub sync-source is enabled (not used in v1).
 
